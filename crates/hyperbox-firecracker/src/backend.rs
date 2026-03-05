@@ -11,6 +11,9 @@ use hyperbox_core::{
     FilePayload, HyperboxError, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
     SandboxLease, SandboxState,
 };
+use hyperbox_network::{
+    FirewallManager, NetworkPolicyEvaluator, RecordingExecutor, ShellExecutor, VmNetworkSpec,
+};
 use hyperbox_proto::hyperbox::v1::hyperbox_agent_client::HyperboxAgentClient;
 
 use crate::{FirecrackerBinary, FirecrackerVmConfig, RunningVm, start_vm};
@@ -22,6 +25,8 @@ pub struct FirecrackerBackendConfig {
     pub kernel_image: PathBuf,
     pub agent_endpoint: String,
     pub rootfs_by_template: HashMap<String, PathBuf>,
+    pub host_iface: String,
+    pub network_dry_run: bool,
 }
 
 impl Default for FirecrackerBackendConfig {
@@ -32,6 +37,8 @@ impl Default for FirecrackerBackendConfig {
             kernel_image: PathBuf::from("/var/lib/hyperbox/vmlinux"),
             agent_endpoint: "http://127.0.0.1:60061".to_string(),
             rootfs_by_template: HashMap::new(),
+            host_iface: "eth0".to_string(),
+            network_dry_run: true,
         }
     }
 }
@@ -41,6 +48,7 @@ struct FirecrackerSandbox {
     config: SandboxConfig,
     info: SandboxInfo,
     vm: RunningVm,
+    network_spec: Option<VmNetworkSpec>,
 }
 
 #[derive(Clone)]
@@ -99,7 +107,8 @@ impl SandboxBackend for FirecrackerBackend {
             memory_mb: config.memory_mb,
             vcpu_count: config.vcpu_count,
             boot_args: "console=ttyS0 reboot=k panic=1 pci=off".to_string(),
-            tap_name: None,
+            tap_name: (!matches!(config.network, hyperbox_core::NetworkMode::None))
+                .then(|| format!("hbx{}", &id.0.to_string()[..8])),
             vsock_guest_cid: 3,
             vsock_uds_path: vsock_path,
         };
@@ -107,6 +116,34 @@ impl SandboxBackend for FirecrackerBackend {
         let vm = start_vm(&self.config.firecracker_binary, vm_config)
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("start firecracker vm: {e}")))?;
+
+        let network_spec = if matches!(config.network, hyperbox_core::NetworkMode::None) {
+            None
+        } else {
+            let spec = VmNetworkSpec {
+                vm_id: id.0.to_string(),
+                tap_name: vm.config.tap_name.clone().unwrap_or_else(|| "hbxunknown".to_string()),
+                host_iface: self.config.host_iface.clone(),
+                guest_cidr: "172.16.0.0/30".to_string(),
+                guest_ip: "172.16.0.2".to_string(),
+            };
+
+            if self.config.network_dry_run {
+                let fw = FirewallManager::new(RecordingExecutor::default());
+                fw.apply(&spec, &config.network)
+                    .await
+                    .map_err(|e| HyperboxError::ExecutionFailed(format!("dry-run firewall apply: {e}")))?;
+            } else {
+                let fw = FirewallManager::new(ShellExecutor);
+                fw.apply(&spec, &config.network)
+                    .await
+                    .map_err(|e| HyperboxError::ExecutionFailed(format!("firewall apply: {e}")))?;
+            }
+
+            // Trigger evaluator construction to validate allowlist syntax early.
+            let _ = NetworkPolicyEvaluator::new(&config.network);
+            Some(spec)
+        };
 
         let info = SandboxInfo {
             id: id.clone(),
@@ -121,6 +158,7 @@ impl SandboxBackend for FirecrackerBackend {
                 config,
                 info: info.clone(),
                 vm,
+                network_spec,
             },
         );
 
@@ -217,6 +255,21 @@ impl SandboxBackend for FirecrackerBackend {
         let mut sandbox = sandboxes
             .remove(sandbox_id)
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+
+        if let Some(spec) = &sandbox.network_spec {
+            if self.config.network_dry_run {
+                let fw = FirewallManager::new(RecordingExecutor::default());
+                fw.teardown(spec)
+                    .await
+                    .map_err(|e| HyperboxError::ExecutionFailed(format!("dry-run firewall teardown: {e}")))?;
+            } else {
+                let fw = FirewallManager::new(ShellExecutor);
+                fw.teardown(spec)
+                    .await
+                    .map_err(|e| HyperboxError::ExecutionFailed(format!("firewall teardown: {e}")))?;
+            }
+        }
+
         sandbox
             .vm
             .terminate()

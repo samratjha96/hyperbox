@@ -11,6 +11,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 hyperbox-core = { path = "../hyperbox-core" }
+hyperbox-network = { path = "../hyperbox-network" }
 hyperbox-proto = { path = "../hyperbox-proto" }
 serde.workspace = true
 serde_json.workspace = true
