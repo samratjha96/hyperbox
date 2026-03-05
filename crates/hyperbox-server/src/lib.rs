@@ -7,11 +7,11 @@ pub mod pool;
 pub mod runtime;
 pub mod snapshot_store;
 
+pub use backend_factory::{BackendKind, select_backend};
+pub use client::GrpcControlClient;
 pub use grpc::{GrpcControlService, serve_grpc};
 pub use local_backend::LocalBackend;
 pub use metrics::{MetricsCollector, MetricsSnapshot};
 pub use pool::{PoolStats, WarmPoolManager};
 pub use runtime::HyperboxServer;
 pub use snapshot_store::InMemorySnapshotStore;
-pub use backend_factory::{BackendKind, select_backend};
-pub use client::GrpcControlClient;

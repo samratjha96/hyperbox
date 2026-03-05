@@ -122,7 +122,11 @@ impl SandboxBackend for FirecrackerBackend {
         } else {
             let spec = VmNetworkSpec {
                 vm_id: id.0.to_string(),
-                tap_name: vm.config.tap_name.clone().unwrap_or_else(|| "hbxunknown".to_string()),
+                tap_name: vm
+                    .config
+                    .tap_name
+                    .clone()
+                    .unwrap_or_else(|| "hbxunknown".to_string()),
                 host_iface: self.config.host_iface.clone(),
                 guest_cidr: "172.16.0.0/30".to_string(),
                 guest_ip: "172.16.0.2".to_string(),
@@ -130,9 +134,9 @@ impl SandboxBackend for FirecrackerBackend {
 
             if self.config.network_dry_run {
                 let fw = FirewallManager::new(RecordingExecutor::default());
-                fw.apply(&spec, &config.network)
-                    .await
-                    .map_err(|e| HyperboxError::ExecutionFailed(format!("dry-run firewall apply: {e}")))?;
+                fw.apply(&spec, &config.network).await.map_err(|e| {
+                    HyperboxError::ExecutionFailed(format!("dry-run firewall apply: {e}"))
+                })?;
             } else {
                 let fw = FirewallManager::new(ShellExecutor);
                 fw.apply(&spec, &config.network)
@@ -259,14 +263,14 @@ impl SandboxBackend for FirecrackerBackend {
         if let Some(spec) = &sandbox.network_spec {
             if self.config.network_dry_run {
                 let fw = FirewallManager::new(RecordingExecutor::default());
-                fw.teardown(spec)
-                    .await
-                    .map_err(|e| HyperboxError::ExecutionFailed(format!("dry-run firewall teardown: {e}")))?;
+                fw.teardown(spec).await.map_err(|e| {
+                    HyperboxError::ExecutionFailed(format!("dry-run firewall teardown: {e}"))
+                })?;
             } else {
                 let fw = FirewallManager::new(ShellExecutor);
-                fw.teardown(spec)
-                    .await
-                    .map_err(|e| HyperboxError::ExecutionFailed(format!("firewall teardown: {e}")))?;
+                fw.teardown(spec).await.map_err(|e| {
+                    HyperboxError::ExecutionFailed(format!("firewall teardown: {e}"))
+                })?;
             }
         }
 

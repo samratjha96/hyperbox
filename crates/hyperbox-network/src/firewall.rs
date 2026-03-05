@@ -98,14 +98,30 @@ pub fn build_apply_plan(spec: &VmNetworkSpec, mode: &NetworkMode) -> Vec<Command
         },
         CommandSpec {
             program: "nft".to_string(),
-            args: vec!["add".to_string(), "table".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id)],
+            args: vec![
+                "add".to_string(),
+                "table".to_string(),
+                "inet".to_string(),
+                format!("vm_{}", spec.vm_id),
+            ],
         },
         CommandSpec {
             program: "nft".to_string(),
             args: vec![
-                "add".to_string(), "chain".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id),
-                "forward".to_string(), "{".to_string(), "type".to_string(), "filter".to_string(),
-                "hook".to_string(), "forward".to_string(), "priority".to_string(), "0".to_string(), ";".to_string(), "}".to_string(),
+                "add".to_string(),
+                "chain".to_string(),
+                "inet".to_string(),
+                format!("vm_{}", spec.vm_id),
+                "forward".to_string(),
+                "{".to_string(),
+                "type".to_string(),
+                "filter".to_string(),
+                "hook".to_string(),
+                "forward".to_string(),
+                "priority".to_string(),
+                "0".to_string(),
+                ";".to_string(),
+                "}".to_string(),
             ],
         },
     ];
@@ -114,31 +130,57 @@ pub fn build_apply_plan(spec: &VmNetworkSpec, mode: &NetworkMode) -> Vec<Command
         NetworkMode::None => commands.push(CommandSpec {
             program: "nft".to_string(),
             args: vec![
-                "add".to_string(), "rule".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id),
-                "forward".to_string(), "iifname".to_string(), spec.tap_name.clone(), "drop".to_string(),
+                "add".to_string(),
+                "rule".to_string(),
+                "inet".to_string(),
+                format!("vm_{}", spec.vm_id),
+                "forward".to_string(),
+                "iifname".to_string(),
+                spec.tap_name.clone(),
+                "drop".to_string(),
             ],
         }),
         NetworkMode::Full => commands.push(CommandSpec {
             program: "nft".to_string(),
             args: vec![
-                "add".to_string(), "rule".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id),
-                "forward".to_string(), "iifname".to_string(), spec.tap_name.clone(), "accept".to_string(),
+                "add".to_string(),
+                "rule".to_string(),
+                "inet".to_string(),
+                format!("vm_{}", spec.vm_id),
+                "forward".to_string(),
+                "iifname".to_string(),
+                spec.tap_name.clone(),
+                "accept".to_string(),
             ],
         }),
         NetworkMode::Allowlist(_) => {
             commands.push(CommandSpec {
                 program: "nft".to_string(),
                 args: vec![
-                    "add".to_string(), "rule".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id),
-                    "forward".to_string(), "iifname".to_string(), spec.tap_name.clone(),
-                    "ip".to_string(), "daddr".to_string(), format!("@vm_{}_allowed", spec.vm_id), "accept".to_string(),
+                    "add".to_string(),
+                    "rule".to_string(),
+                    "inet".to_string(),
+                    format!("vm_{}", spec.vm_id),
+                    "forward".to_string(),
+                    "iifname".to_string(),
+                    spec.tap_name.clone(),
+                    "ip".to_string(),
+                    "daddr".to_string(),
+                    format!("@vm_{}_allowed", spec.vm_id),
+                    "accept".to_string(),
                 ],
             });
             commands.push(CommandSpec {
                 program: "nft".to_string(),
                 args: vec![
-                    "add".to_string(), "rule".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id),
-                    "forward".to_string(), "iifname".to_string(), spec.tap_name.clone(), "drop".to_string(),
+                    "add".to_string(),
+                    "rule".to_string(),
+                    "inet".to_string(),
+                    format!("vm_{}", spec.vm_id),
+                    "forward".to_string(),
+                    "iifname".to_string(),
+                    spec.tap_name.clone(),
+                    "drop".to_string(),
                 ],
             });
         }
@@ -147,9 +189,16 @@ pub fn build_apply_plan(spec: &VmNetworkSpec, mode: &NetworkMode) -> Vec<Command
     commands.push(CommandSpec {
         program: "nft".to_string(),
         args: vec![
-            "add".to_string(), "rule".to_string(), "nat".to_string(), "postrouting".to_string(),
-            "ip".to_string(), "saddr".to_string(), spec.guest_ip.clone(),
-            "oifname".to_string(), spec.host_iface.clone(), "masquerade".to_string(),
+            "add".to_string(),
+            "rule".to_string(),
+            "nat".to_string(),
+            "postrouting".to_string(),
+            "ip".to_string(),
+            "saddr".to_string(),
+            spec.guest_ip.clone(),
+            "oifname".to_string(),
+            spec.host_iface.clone(),
+            "masquerade".to_string(),
         ],
     });
 
@@ -160,7 +209,12 @@ pub fn build_teardown_plan(spec: &VmNetworkSpec) -> Vec<CommandSpec> {
     vec![
         CommandSpec {
             program: "nft".to_string(),
-            args: vec!["delete".to_string(), "table".to_string(), "inet".to_string(), format!("vm_{}", spec.vm_id)],
+            args: vec![
+                "delete".to_string(),
+                "table".to_string(),
+                "inet".to_string(),
+                format!("vm_{}", spec.vm_id),
+            ],
         },
         CommandSpec {
             program: "ipset".to_string(),
@@ -185,7 +239,13 @@ mod tests {
 
     #[test]
     fn allowlist_plan_contains_ipset_reference() {
-        let plan = build_apply_plan(&spec(), &NetworkMode::Allowlist(vec!["api.openai.com".to_string()]));
-        assert!(plan.iter().any(|c| c.args.iter().any(|a| a.contains("@vm_abc_allowed"))));
+        let plan = build_apply_plan(
+            &spec(),
+            &NetworkMode::Allowlist(vec!["api.openai.com".to_string()]),
+        );
+        assert!(
+            plan.iter()
+                .any(|c| c.args.iter().any(|a| a.contains("@vm_abc_allowed")))
+        );
     }
 }

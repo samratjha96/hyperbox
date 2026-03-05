@@ -7,7 +7,11 @@ use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig};
 use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend};
 
 #[derive(Debug, Parser)]
-#[command(name = "hyperbox", version, about = "Secure sandbox runtime for agent code execution")]
+#[command(
+    name = "hyperbox",
+    version,
+    about = "Secure sandbox runtime for agent code execution"
+)]
 struct Cli {
     #[arg(long)]
     server_url: Option<String>,

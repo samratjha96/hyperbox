@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
-    SnapshotId, SnapshotMetadata, SnapshotStore, TemplateRegistry,
+    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId,
+    SandboxInfo, SnapshotId, SnapshotMetadata, SnapshotStore, TemplateRegistry,
 };
 
 use crate::metrics::{MetricsCollector, MetricsSnapshot};
@@ -100,7 +100,9 @@ impl HyperboxServer {
             .await
             .get(sandbox_id)
             .cloned()
-            .ok_or_else(|| hyperbox_core::HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+            .ok_or_else(|| {
+                hyperbox_core::HyperboxError::SandboxNotFound(sandbox_id.0.to_string())
+            })?;
         self.snapshots
             .create_snapshot(sandbox_id, &sandbox.template, note)
             .await
@@ -111,7 +113,9 @@ impl HyperboxServer {
             .snapshots
             .get_snapshot(snapshot_id)
             .await?
-            .ok_or_else(|| hyperbox_core::HyperboxError::ExecutionFailed("snapshot not found".to_string()))?;
+            .ok_or_else(|| {
+                hyperbox_core::HyperboxError::ExecutionFailed("snapshot not found".to_string())
+            })?;
 
         self.create_sandbox(SandboxConfig {
             template: snapshot.template,

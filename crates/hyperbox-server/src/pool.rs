@@ -1,6 +1,6 @@
 use std::{
-    future::Future,
     collections::{HashSet, VecDeque},
+    future::Future,
     sync::Arc,
     time::Duration,
 };
@@ -25,7 +25,7 @@ pub struct WarmPoolManager<B: SandboxBackend> {
     in_use: Arc<Mutex<HashSet<SandboxId>>>,
 }
 
-impl<B: SandboxBackend> WarmPoolManager<B> {
+impl<B: SandboxBackend + 'static> WarmPoolManager<B> {
     pub fn new(backend: Arc<B>, config: SandboxConfig, target_size: usize) -> Self {
         Self {
             backend,

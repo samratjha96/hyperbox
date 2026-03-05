@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{RData, RecordType},
+    rr::RData,
     serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder},
 };
 
@@ -121,6 +121,7 @@ fn encode_message(message: &Message) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use hickory_proto::rr::Name;
+    use hickory_proto::rr::RecordType;
 
     fn build_query(domain: &str) -> Vec<u8> {
         let mut msg = Message::new();

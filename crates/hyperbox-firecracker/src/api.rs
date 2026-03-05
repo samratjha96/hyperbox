@@ -28,25 +28,41 @@ impl FirecrackerApiClient {
         self.send("GET", path, None).await
     }
 
-    pub async fn put_json<T: Serialize>(&self, path: &str, payload: &T) -> anyhow::Result<ApiResponse> {
+    pub async fn put_json<T: Serialize>(
+        &self,
+        path: &str,
+        payload: &T,
+    ) -> anyhow::Result<ApiResponse> {
         let body = serde_json::to_string(payload)?;
         self.send("PUT", path, Some(body)).await
     }
 
-    pub async fn patch_json<T: Serialize>(&self, path: &str, payload: &T) -> anyhow::Result<ApiResponse> {
+    pub async fn patch_json<T: Serialize>(
+        &self,
+        path: &str,
+        payload: &T,
+    ) -> anyhow::Result<ApiResponse> {
         let body = serde_json::to_string(payload)?;
         self.send("PATCH", path, Some(body)).await
     }
 
-    async fn send(&self, method: &str, path: &str, body: Option<String>) -> anyhow::Result<ApiResponse> {
+    async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> anyhow::Result<ApiResponse> {
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
-            .with_context(|| format!("connect firecracker socket {}", self.socket_path.display()))?;
+            .with_context(|| {
+                format!("connect firecracker socket {}", self.socket_path.display())
+            })?;
 
         let body = body.unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(), body
+            body.len(),
+            body
         );
 
         stream.write_all(request.as_bytes()).await?;
@@ -57,7 +73,11 @@ impl FirecrackerApiClient {
         parse_http_response(&response)
     }
 
-    pub async fn set_machine_config(&self, vcpu_count: u8, mem_size_mib: u32) -> anyhow::Result<()> {
+    pub async fn set_machine_config(
+        &self,
+        vcpu_count: u8,
+        mem_size_mib: u32,
+    ) -> anyhow::Result<()> {
         let response = self
             .put_json(
                 "/machine-config",
@@ -72,7 +92,11 @@ impl FirecrackerApiClient {
         ensure_success(response)
     }
 
-    pub async fn set_boot_source(&self, kernel_image_path: &str, boot_args: &str) -> anyhow::Result<()> {
+    pub async fn set_boot_source(
+        &self,
+        kernel_image_path: &str,
+        boot_args: &str,
+    ) -> anyhow::Result<()> {
         let response = self
             .put_json(
                 "/boot-source",
@@ -134,12 +158,19 @@ impl FirecrackerApiClient {
 
     pub async fn start_instance(&self) -> anyhow::Result<()> {
         let response = self
-            .put_json("/actions", &serde_json::json!({"action_type": "InstanceStart"}))
+            .put_json(
+                "/actions",
+                &serde_json::json!({"action_type": "InstanceStart"}),
+            )
             .await?;
         ensure_success(response)
     }
 
-    pub async fn create_snapshot(&self, mem_file_path: &str, snapshot_path: &str) -> anyhow::Result<()> {
+    pub async fn create_snapshot(
+        &self,
+        mem_file_path: &str,
+        snapshot_path: &str,
+    ) -> anyhow::Result<()> {
         let response = self
             .put_json(
                 "/snapshot/create",
@@ -153,7 +184,11 @@ impl FirecrackerApiClient {
         ensure_success(response)
     }
 
-    pub async fn load_snapshot(&self, mem_file_path: &str, snapshot_path: &str) -> anyhow::Result<()> {
+    pub async fn load_snapshot(
+        &self,
+        mem_file_path: &str,
+        snapshot_path: &str,
+    ) -> anyhow::Result<()> {
         let response = self
             .put_json(
                 "/snapshot/load",
@@ -171,9 +206,14 @@ impl FirecrackerApiClient {
     pub async fn describe_instance(&self) -> anyhow::Result<Value> {
         let response = self.get("/").await?;
         if response.status_code >= 400 {
-            anyhow::bail!("firecracker describe instance failed: {} {}", response.status_code, response.body);
+            anyhow::bail!(
+                "firecracker describe instance failed: {} {}",
+                response.status_code,
+                response.body
+            );
         }
-        Ok(serde_json::from_str(&response.body).unwrap_or_else(|_| serde_json::json!({"raw": response.body})))
+        Ok(serde_json::from_str(&response.body)
+            .unwrap_or_else(|_| serde_json::json!({"raw": response.body})))
     }
 }
 

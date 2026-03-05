@@ -8,10 +8,7 @@ use tokio::{
 };
 use tonic::{Request, Response, Status};
 
-use hyperbox_proto::hyperbox::v1::{
-    self as pb,
-    hyperbox_agent_server::HyperboxAgent,
-};
+use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_agent_server::HyperboxAgent};
 
 #[derive(Debug, Clone)]
 struct AgentSandbox {

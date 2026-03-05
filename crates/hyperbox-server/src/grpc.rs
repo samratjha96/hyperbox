@@ -1,12 +1,7 @@
 use tonic::{Request, Response, Status};
 
-use hyperbox_core::{
-    ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId, SnapshotId,
-};
-use hyperbox_proto::hyperbox::v1::{
-    self as pb,
-    hyperbox_control_server::HyperboxControl,
-};
+use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
+use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_server::HyperboxControl};
 
 use crate::HyperboxServer;
 
@@ -37,11 +32,12 @@ fn into_proto_info(info: hyperbox_core::SandboxInfo) -> pb::SandboxInfo {
 }
 
 fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
-    let network = match pb::NetworkMode::try_from(config.network_mode).unwrap_or(pb::NetworkMode::NetworkModeNone) {
-        pb::NetworkMode::NetworkModeAllowlist => NetworkMode::Allowlist(config.network_allowlist),
-        pb::NetworkMode::NetworkModeFull => NetworkMode::Full,
-        _ => NetworkMode::None,
-    };
+    let network =
+        match pb::NetworkMode::try_from(config.network_mode).unwrap_or(pb::NetworkMode::None) {
+            pb::NetworkMode::Allowlist => NetworkMode::Allowlist(config.network_allowlist),
+            pb::NetworkMode::Full => NetworkMode::Full,
+            _ => NetworkMode::None,
+        };
 
     SandboxConfig {
         template: if config.template.is_empty() {
@@ -69,8 +65,8 @@ fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
     }
 }
 
-impl From<hyperbox_core::MetricsSnapshot> for pb::MetricsResponse {
-    fn from(value: hyperbox_core::MetricsSnapshot) -> Self {
+impl From<crate::MetricsSnapshot> for pb::MetricsResponse {
+    fn from(value: crate::MetricsSnapshot) -> Self {
         Self {
             creates: value.creates,
             destroys: value.destroys,
@@ -221,7 +217,11 @@ impl HyperboxControl for GrpcControlService {
             .runtime
             .create_snapshot(
                 &sandbox_id,
-                if request.note.is_empty() { None } else { Some(request.note) },
+                if request.note.is_empty() {
+                    None
+                } else {
+                    Some(request.note)
+                },
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -259,7 +259,9 @@ pub async fn serve_grpc(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let service = GrpcControlService::new(runtime);
 
     tonic::transport::Server::builder()
-        .add_service(pb::hyperbox_control_server::HyperboxControlServer::new(service))
+        .add_service(pb::hyperbox_control_server::HyperboxControlServer::new(
+            service,
+        ))
         .serve(addr)
         .await?;
 

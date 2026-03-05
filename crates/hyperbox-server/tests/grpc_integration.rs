@@ -5,7 +5,7 @@ use hyperbox_server::{GrpcControlClient, serve_grpc};
 
 #[tokio::test]
 async fn grpc_roundtrip_lifecycle() {
-    std::env::set_var("HYPERBOX_BACKEND", "local");
+    unsafe { std::env::set_var("HYPERBOX_BACKEND", "local") };
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("read local addr");
@@ -36,7 +36,11 @@ async fn grpc_roundtrip_lifecycle() {
         .exec(
             &sandbox.id,
             ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat input.txt".to_string()],
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "cat input.txt".to_string(),
+                ],
                 timeout_secs: 2,
             },
         )

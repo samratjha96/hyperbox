@@ -1,8 +1,5 @@
 use hyperbox_core::{ExecOutcome, ExecRequest, NetworkMode, SandboxConfig, SandboxInfo};
-use hyperbox_proto::hyperbox::v1::{
-    self as pb,
-    hyperbox_control_client::HyperboxControlClient,
-};
+use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_client::HyperboxControlClient};
 
 #[derive(Debug, Clone)]
 pub struct GrpcControlClient {
@@ -33,9 +30,9 @@ impl GrpcControlClient {
                 timeout_secs: config.timeout_secs,
                 env: config.env.into_iter().collect(),
                 network_mode: match config.network {
-                    NetworkMode::None => pb::NetworkMode::NetworkModeNone as i32,
-                    NetworkMode::Allowlist(_) => pb::NetworkMode::NetworkModeAllowlist as i32,
-                    NetworkMode::Full => pb::NetworkMode::NetworkModeFull as i32,
+                    NetworkMode::None => pb::NetworkMode::None as i32,
+                    NetworkMode::Allowlist(_) => pb::NetworkMode::Allowlist as i32,
+                    NetworkMode::Full => pb::NetworkMode::Full as i32,
                 },
                 network_allowlist: match config.network {
                     NetworkMode::Allowlist(v) => v,
@@ -56,7 +53,8 @@ impl GrpcControlClient {
             id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
             template: info.template,
             state: hyperbox_core::SandboxState::Ready,
-            created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?.with_timezone(&chrono::Utc),
+            created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+                .with_timezone(&chrono::Utc),
         })
     }
 

@@ -69,7 +69,11 @@ impl RunningVm {
         FirecrackerApiClient::new(&self.config.socket_path)
     }
 
-    pub async fn create_snapshot(&self, snapshot_path: &Path, mem_path: &Path) -> anyhow::Result<()> {
+    pub async fn create_snapshot(
+        &self,
+        snapshot_path: &Path,
+        mem_path: &Path,
+    ) -> anyhow::Result<()> {
         self.api_client()
             .create_snapshot(
                 &mem_path.to_string_lossy(),
@@ -88,14 +92,17 @@ impl RunningVm {
     }
 }
 
-pub async fn start_vm(binary: &FirecrackerBinary, config: FirecrackerVmConfig) -> anyhow::Result<RunningVm> {
+pub async fn start_vm(
+    binary: &FirecrackerBinary,
+    config: FirecrackerVmConfig,
+) -> anyhow::Result<RunningVm> {
     if let Some(parent) = config.socket_path.parent() {
         fs::create_dir_all(parent).await?;
     }
 
     let _ = fs::remove_file(&config.socket_path).await;
 
-    let mut child = Command::new(&binary.firecracker_path)
+    let child = Command::new(&binary.firecracker_path)
         .arg("--api-sock")
         .arg(&config.socket_path)
         .arg("--log-path")
@@ -108,12 +115,20 @@ pub async fn start_vm(binary: &FirecrackerBinary, config: FirecrackerVmConfig) -
     wait_for_socket(&config.socket_path, Duration::from_secs(3)).await?;
 
     let api = FirecrackerApiClient::new(&config.socket_path);
-    api.set_machine_config(config.vcpu_count, config.memory_mb).await?;
-    api.set_boot_source(&config.kernel_image_path.to_string_lossy(), &config.boot_args)
+    api.set_machine_config(config.vcpu_count, config.memory_mb)
         .await?;
-    api.set_rootfs(&config.rootfs_path.to_string_lossy(), false).await?;
-    api.set_vsock(config.vsock_guest_cid, &config.vsock_uds_path.to_string_lossy())
+    api.set_boot_source(
+        &config.kernel_image_path.to_string_lossy(),
+        &config.boot_args,
+    )
+    .await?;
+    api.set_rootfs(&config.rootfs_path.to_string_lossy(), false)
         .await?;
+    api.set_vsock(
+        config.vsock_guest_cid,
+        &config.vsock_uds_path.to_string_lossy(),
+    )
+    .await?;
     if let Some(tap) = &config.tap_name {
         api.attach_network(tap).await?;
     }
@@ -148,7 +163,10 @@ async fn wait_for_socket(path: &Path, timeout: Duration) -> anyhow::Result<()> {
         sleep(Duration::from_millis(30)).await;
     }
 
-    anyhow::bail!("timed out waiting for firecracker socket: {}", path.display());
+    anyhow::bail!(
+        "timed out waiting for firecracker socket: {}",
+        path.display()
+    );
 }
 
 #[cfg(test)]
@@ -161,6 +179,9 @@ mod tests {
         let err = wait_for_socket(&path, Duration::from_millis(50))
             .await
             .expect_err("should timeout");
-        assert!(err.to_string().contains("timed out waiting for firecracker socket"));
+        assert!(
+            err.to_string()
+                .contains("timed out waiting for firecracker socket")
+        );
     }
 }
