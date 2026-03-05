@@ -36,6 +36,12 @@ pub struct SandboxInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecRequest {
+    pub command: Vec<String>,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecOutcome {
     pub exit_code: i32,
     pub stdout: String,
@@ -67,5 +73,15 @@ mod tests {
     fn sandbox_id_default_generates_id() {
         let id = SandboxId::default();
         assert_ne!(id.0, Uuid::nil());
+    }
+
+    #[test]
+    fn exec_request_requires_command() {
+        let req = ExecRequest {
+            command: vec!["echo".to_string(), "ok".to_string()],
+            timeout_secs: 10,
+        };
+
+        assert_eq!(req.command[0], "echo");
     }
 }
