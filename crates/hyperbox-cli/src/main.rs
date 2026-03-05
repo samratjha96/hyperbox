@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig};
+use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig};
 use hyperbox_server::{HyperboxServer, LocalBackend};
 
 #[derive(Debug, Parser)]
@@ -24,6 +24,10 @@ enum Command {
         allow: Vec<String>,
         #[arg(long, default_value_t = 60)]
         timeout: u64,
+        #[arg(long = "write")]
+        writes: Vec<String>,
+        #[arg(long = "read")]
+        reads: Vec<String>,
     },
     Templates,
     Probe,
@@ -59,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
             network,
             allow,
             timeout,
+            writes,
+            reads,
         } => {
             let config = SandboxConfig {
                 template,
@@ -68,6 +74,22 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let sandbox = server.create_sandbox(config).await?;
+
+            for entry in writes {
+                let (path, content) = entry
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
+                server
+                    .write_file(
+                        &sandbox.id,
+                        FilePayload {
+                            path: path.to_string().into(),
+                            bytes: content.as_bytes().to_vec(),
+                        },
+                    )
+                    .await?;
+            }
+
             let outcome = server
                 .exec(
                     &sandbox.id,
@@ -80,6 +102,17 @@ async fn main() -> anyhow::Result<()> {
 
             print!("{}", outcome.stdout);
             eprint!("{}", outcome.stderr);
+
+            for path in reads {
+                let payload = server.read_file(&sandbox.id, &path).await?;
+                let data = String::from_utf8_lossy(&payload.bytes);
+                println!("--- {path} ---");
+                print!("{data}");
+                if !data.ends_with('\n') {
+                    println!();
+                }
+            }
+
             server.destroy_sandbox(&sandbox.id).await?;
 
             if outcome.exit_code != 0 {

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
+    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
     TemplateRegistry,
 };
 
@@ -55,6 +55,14 @@ impl HyperboxServer {
 
     pub async fn inspect(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
         self.backend.inspect(sandbox_id).await
+    }
+
+    pub async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
+        self.backend.read_file(sandbox_id, path).await
+    }
+
+    pub async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
+        self.backend.write_file(sandbox_id, payload).await
     }
 
     pub async fn destroy_sandbox(&self, sandbox_id: &SandboxId) -> Result<()> {
