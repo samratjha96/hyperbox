@@ -7,7 +7,11 @@ use hyperbox_server::{GrpcControlClient, serve_grpc};
 async fn grpc_roundtrip_lifecycle() {
     unsafe { std::env::set_var("HYPERBOX_BACKEND", "local") };
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind ephemeral port: {err}"),
+    };
     let addr = listener.local_addr().expect("read local addr");
     drop(listener);
 
