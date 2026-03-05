@@ -6,7 +6,7 @@ members = [
   "crates/hyperbox-firecracker",
   "crates/hyperbox-apple",
   "crates/hyperbox-server",
-  "crates/hyperbox-cli",
+  "crates/hyperbox-cli", "crates/hyperbox-proto",
 ]
 resolver = "2"
 

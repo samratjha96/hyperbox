@@ -1,0 +1,15 @@
+[package]
+name = "hyperbox-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = "0.13"
+tonic = { version = "0.12", features = ["transport"] }
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
