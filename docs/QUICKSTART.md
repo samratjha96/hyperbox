@@ -68,3 +68,4 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 - Network allowlist is currently policy-evaluated in libraries; host firewall enforcement is planned for Linux/macOS backend integration.
 - Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
 - `network=allowlist` and `network=full` are rejected by LocalBackend and Apple backend unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`). This prevents false-positive security behavior.
+- On macOS, backend runtime selection can be forced with `HYPERBOX_APPLE_RUNTIME=containerization|virtualization`; auto mode prefers containerization only when available on host.

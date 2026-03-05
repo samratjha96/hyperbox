@@ -1,6 +1,8 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use hyperbox_apple::{AppleBackendConfig, AppleVzBackend, detect_macos_capabilities};
+use hyperbox_apple::{
+    AppleBackendConfig, AppleRuntimeKind, AppleVzBackend, detect_macos_capabilities,
+};
 use hyperbox_core::SandboxBackend;
 use hyperbox_firecracker::{
     FirecrackerBackend, FirecrackerBackendConfig, detect_linux_capabilities,
@@ -107,6 +109,23 @@ fn build_firecracker_backend() -> FirecrackerBackend {
 }
 
 fn build_apple_backend() -> AppleVzBackend {
+    let caps = detect_macos_capabilities();
+    let runtime_kind = match std::env::var("HYPERBOX_APPLE_RUNTIME")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "containerization" => AppleRuntimeKind::Containerization,
+        "virtualization" => AppleRuntimeKind::Virtualization,
+        _ => {
+            if caps.supports_containerization_framework {
+                AppleRuntimeKind::Containerization
+            } else {
+                AppleRuntimeKind::Virtualization
+            }
+        }
+    };
+
     AppleVzBackend::new(AppleBackendConfig {
         work_dir: std::env::var("HYPERBOX_APPLE_WORKDIR")
             .map(PathBuf::from)
@@ -114,5 +133,6 @@ fn build_apple_backend() -> AppleVzBackend {
         agent_endpoint: std::env::var("HYPERBOX_AGENT_ENDPOINT")
             .unwrap_or_else(|_| "http://127.0.0.1:60061".to_string()),
         launch_command: None,
+        runtime_kind,
     })
 }

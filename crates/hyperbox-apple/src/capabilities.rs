@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,8 @@ pub struct MacOsCapabilities {
     pub is_apple_silicon: bool,
     pub supports_virtualization_framework: bool,
     pub supports_containerization_framework: bool,
+    pub has_container_cli: bool,
+    pub has_containerization_framework: bool,
 }
 
 impl MacOsCapabilities {
@@ -42,7 +45,17 @@ pub fn detect_macos_capabilities() -> MacOsCapabilities {
 
     let is_apple_silicon = std::env::consts::ARCH == "aarch64";
     let supports_virtualization_framework = major_version >= 11 && is_apple_silicon;
-    let supports_containerization_framework = major_version >= 26 && is_apple_silicon;
+    let has_container_cli = Command::new("sh")
+        .arg("-lc")
+        .arg("command -v container >/dev/null 2>&1")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    let has_containerization_framework =
+        Path::new("/System/Library/Frameworks/Containerization.framework").exists();
+    let supports_containerization_framework = major_version >= 26
+        && is_apple_silicon
+        && (has_container_cli || has_containerization_framework);
 
     MacOsCapabilities {
         os: std::env::consts::OS.to_string(),
@@ -51,6 +64,8 @@ pub fn detect_macos_capabilities() -> MacOsCapabilities {
         is_apple_silicon,
         supports_virtualization_framework,
         supports_containerization_framework,
+        has_container_cli,
+        has_containerization_framework,
     }
 }
 

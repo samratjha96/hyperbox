@@ -9,11 +9,20 @@ use hyperbox_core::{
 };
 use hyperbox_proto::hyperbox::v1::hyperbox_agent_client::HyperboxAgentClient;
 
+use crate::detect_macos_capabilities;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleRuntimeKind {
+    Containerization,
+    Virtualization,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppleBackendConfig {
     pub work_dir: PathBuf,
     pub agent_endpoint: String,
     pub launch_command: Option<Vec<String>>,
+    pub runtime_kind: AppleRuntimeKind,
 }
 
 impl Default for AppleBackendConfig {
@@ -22,6 +31,7 @@ impl Default for AppleBackendConfig {
             work_dir: std::env::temp_dir().join("hyperbox-apple"),
             agent_endpoint: "http://127.0.0.1:60061".to_string(),
             launch_command: None,
+            runtime_kind: AppleRuntimeKind::Virtualization,
         }
     }
 }
@@ -83,6 +93,14 @@ impl SandboxBackend for AppleVzBackend {
         if !matches!(config.network, NetworkMode::None) {
             return Err(HyperboxError::InvalidConfig(
                 "apple backend network policy enforcement is not implemented yet; use network=none"
+                    .to_string(),
+            ));
+        }
+        if matches!(self.config.runtime_kind, AppleRuntimeKind::Containerization)
+            && !detect_macos_capabilities().supports_containerization_framework
+        {
+            return Err(HyperboxError::InvalidConfig(
+                "apple containerization runtime requested but not available on this host"
                     .to_string(),
             ));
         }
