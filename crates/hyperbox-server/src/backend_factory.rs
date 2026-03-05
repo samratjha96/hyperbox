@@ -126,13 +126,22 @@ fn build_apple_backend() -> AppleVzBackend {
         }
     };
 
+    let launch_command = std::env::var("HYPERBOX_APPLE_HELPER")
+        .ok()
+        .map(|cmd| {
+            cmd.split_whitespace()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|parts| !parts.is_empty());
+
     AppleVzBackend::new(AppleBackendConfig {
         work_dir: std::env::var("HYPERBOX_APPLE_WORKDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir().join("hyperbox-apple")),
         agent_endpoint: std::env::var("HYPERBOX_AGENT_ENDPOINT")
             .unwrap_or_else(|_| "http://127.0.0.1:60061".to_string()),
-        launch_command: None,
+        launch_command,
         runtime_kind,
     })
 }

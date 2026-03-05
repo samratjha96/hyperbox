@@ -69,3 +69,4 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 - Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
 - `network=allowlist` and `network=full` are rejected by LocalBackend and Apple backend unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`). This prevents false-positive security behavior.
 - On macOS, backend runtime selection can be forced with `HYPERBOX_APPLE_RUNTIME=containerization|virtualization`; auto mode prefers containerization only when available on host.
+- Apple backend supports a helper bridge command (`HYPERBOX_APPLE_HELPER`) for native runtime integration; protocol is documented in `docs/APPLE_HELPER_PROTOCOL.md`.

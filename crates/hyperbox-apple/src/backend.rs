@@ -1,7 +1,13 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
-use tokio::{process::Child, sync::Mutex};
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout},
+    sync::Mutex,
+};
 
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
@@ -36,11 +42,94 @@ impl Default for AppleBackendConfig {
     }
 }
 
-#[derive(Debug)]
+struct AppleHelperSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    _stderr: Option<ChildStderr>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum HelperRequest {
+    Create {
+        sandbox_id: String,
+        template: String,
+        workspace_dir: Option<String>,
+        runtime: String,
+    },
+    Exec {
+        sandbox_id: String,
+        command: Vec<String>,
+        timeout_secs: u64,
+    },
+    Read {
+        sandbox_id: String,
+        path: String,
+    },
+    Write {
+        sandbox_id: String,
+        path: String,
+        bytes_b64: String,
+    },
+    Destroy {
+        sandbox_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum HelperResponse {
+    Ack,
+    Exec {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+        duration_ms: u128,
+    },
+    Read {
+        bytes_b64: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+impl AppleHelperSession {
+    async fn request(&mut self, req: &HelperRequest) -> Result<HelperResponse> {
+        let encoded = serde_json::to_string(req)?;
+        self.stdin.write_all(encoded.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+
+        let mut line = String::new();
+        let read = self.stdout.read_line(&mut line).await?;
+        if read == 0 {
+            return Err(HyperboxError::ExecutionFailed(
+                "apple helper closed stdout unexpectedly".to_string(),
+            ));
+        }
+        serde_json::from_str(line.trim_end()).map_err(HyperboxError::Serde)
+    }
+
+    async fn shutdown(&mut self, sandbox_id: &SandboxId) -> Result<()> {
+        let _ = self
+            .request(&HelperRequest::Destroy {
+                sandbox_id: sandbox_id.0.to_string(),
+            })
+            .await;
+        self.child
+            .kill()
+            .await
+            .map_err(|e| HyperboxError::ExecutionFailed(format!("kill apple helper: {e}")))?;
+        Ok(())
+    }
+}
+
 struct AppleSandbox {
     info: SandboxInfo,
-    _config: SandboxConfig,
-    vm_process: Option<Child>,
+    config: SandboxConfig,
+    helper: Option<AppleHelperSession>,
 }
 
 #[derive(Clone)]
@@ -57,11 +146,20 @@ impl AppleVzBackend {
         }
     }
 
-    async fn start_vm_if_needed(&self, sandbox_id: &SandboxId) -> Result<Option<Child>> {
+    fn runtime_name(&self) -> &'static str {
+        match self.config.runtime_kind {
+            AppleRuntimeKind::Containerization => "containerization",
+            AppleRuntimeKind::Virtualization => "virtualization",
+        }
+    }
+
+    async fn start_helper_if_needed(
+        &self,
+        sandbox_id: &SandboxId,
+    ) -> Result<Option<AppleHelperSession>> {
         let Some(command) = &self.config.launch_command else {
             return Ok(None);
         };
-
         if command.is_empty() {
             return Err(HyperboxError::InvalidConfig(
                 "apple launch command is empty".to_string(),
@@ -72,18 +170,28 @@ impl AppleVzBackend {
         cmd.args(&command[1..]);
         cmd.env("HYPERBOX_SANDBOX_ID", sandbox_id.0.to_string());
         cmd.current_dir(&self.config.work_dir);
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
-            .map_err(|e| HyperboxError::ExecutionFailed(format!("spawn apple vm command: {e}")))?;
-        Ok(Some(child))
-    }
+            .map_err(|e| HyperboxError::ExecutionFailed(format!("spawn apple helper: {e}")))?;
 
-    async fn ensure_exists(&self, sandbox_id: &SandboxId) -> Result<()> {
-        if !self.sandboxes.lock().await.contains_key(sandbox_id) {
-            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
-        }
-        Ok(())
+        let stdin = child.stdin.take().ok_or_else(|| {
+            HyperboxError::ExecutionFailed("apple helper missing stdin pipe".to_string())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            HyperboxError::ExecutionFailed("apple helper missing stdout pipe".to_string())
+        })?;
+        let stderr = child.stderr.take();
+
+        Ok(Some(AppleHelperSession {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            _stderr: stderr,
+        }))
     }
 }
 
@@ -115,14 +223,37 @@ impl SandboxBackend for AppleVzBackend {
             created_at: Utc::now(),
         };
 
-        let vm_process = self.start_vm_if_needed(&id).await?;
+        let mut helper = self.start_helper_if_needed(&id).await?;
+        if let Some(helper_session) = helper.as_mut() {
+            let response = helper_session
+                .request(&HelperRequest::Create {
+                    sandbox_id: id.0.to_string(),
+                    template: config.template.clone(),
+                    workspace_dir: config.workspace_dir.clone(),
+                    runtime: self.runtime_name().to_string(),
+                })
+                .await?;
+            match response {
+                HelperResponse::Ack => {}
+                HelperResponse::Error { message } => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "apple helper create failed: {message}"
+                    )));
+                }
+                other => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "unexpected apple helper response on create: {other:?}"
+                    )));
+                }
+            }
+        }
 
         self.sandboxes.lock().await.insert(
             id.clone(),
             AppleSandbox {
                 info: info.clone(),
-                _config: config,
-                vm_process,
+                config,
+                helper,
             },
         );
 
@@ -134,12 +265,49 @@ impl SandboxBackend for AppleVzBackend {
         sandbox_id: &SandboxId,
         req: hyperbox_core::ExecRequest,
     ) -> Result<hyperbox_core::ExecOutcome> {
-        self.ensure_exists(sandbox_id).await?;
+        let mut sandboxes = self.sandboxes.lock().await;
+        let sandbox = sandboxes
+            .get_mut(sandbox_id)
+            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+
+        if let Some(helper) = sandbox.helper.as_mut() {
+            match helper
+                .request(&HelperRequest::Exec {
+                    sandbox_id: sandbox_id.0.to_string(),
+                    command: req.command,
+                    timeout_secs: req.timeout_secs,
+                })
+                .await?
+            {
+                HelperResponse::Exec {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    duration_ms,
+                } => {
+                    return Ok(hyperbox_core::ExecOutcome {
+                        exit_code,
+                        stdout,
+                        stderr,
+                        duration_ms,
+                    });
+                }
+                HelperResponse::Error { message } => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "apple helper exec failed: {message}"
+                    )));
+                }
+                other => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "unexpected apple helper response on exec: {other:?}"
+                    )));
+                }
+            }
+        }
 
         let mut agent = HyperboxAgentClient::connect(self.config.agent_endpoint.clone())
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("connect agent: {e}")))?;
-
         let response = agent
             .exec(hyperbox_proto::hyperbox::v1::ExecRequest {
                 sandbox_id: sandbox_id.0.to_string(),
@@ -149,7 +317,6 @@ impl SandboxBackend for AppleVzBackend {
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("exec via agent: {e}")))?
             .into_inner();
-
         Ok(hyperbox_core::ExecOutcome {
             exit_code: response.exit_code,
             stdout: response.stdout,
@@ -159,12 +326,44 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
-        self.ensure_exists(sandbox_id).await?;
+        let mut sandboxes = self.sandboxes.lock().await;
+        let sandbox = sandboxes
+            .get_mut(sandbox_id)
+            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+
+        if let Some(helper) = sandbox.helper.as_mut() {
+            match helper
+                .request(&HelperRequest::Read {
+                    sandbox_id: sandbox_id.0.to_string(),
+                    path: path.to_string(),
+                })
+                .await?
+            {
+                HelperResponse::Read { bytes_b64 } => {
+                    let bytes = BASE64.decode(bytes_b64.as_bytes()).map_err(|e| {
+                        HyperboxError::ExecutionFailed(format!("decode helper read payload: {e}"))
+                    })?;
+                    return Ok(FilePayload {
+                        path: path.to_string().into(),
+                        bytes,
+                    });
+                }
+                HelperResponse::Error { message } => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "apple helper read failed: {message}"
+                    )));
+                }
+                other => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "unexpected apple helper response on read: {other:?}"
+                    )));
+                }
+            }
+        }
 
         let mut agent = HyperboxAgentClient::connect(self.config.agent_endpoint.clone())
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("connect agent: {e}")))?;
-
         let response = agent
             .read_file(hyperbox_proto::hyperbox::v1::ReadFileRequest {
                 sandbox_id: sandbox_id.0.to_string(),
@@ -173,7 +372,6 @@ impl SandboxBackend for AppleVzBackend {
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("read file via agent: {e}")))?
             .into_inner();
-
         Ok(FilePayload {
             path: path.to_string().into(),
             bytes: response.bytes,
@@ -181,12 +379,37 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
-        self.ensure_exists(sandbox_id).await?;
+        let mut sandboxes = self.sandboxes.lock().await;
+        let sandbox = sandboxes
+            .get_mut(sandbox_id)
+            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+
+        if let Some(helper) = sandbox.helper.as_mut() {
+            match helper
+                .request(&HelperRequest::Write {
+                    sandbox_id: sandbox_id.0.to_string(),
+                    path: payload.path.to_string(),
+                    bytes_b64: BASE64.encode(payload.bytes),
+                })
+                .await?
+            {
+                HelperResponse::Ack => return Ok(()),
+                HelperResponse::Error { message } => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "apple helper write failed: {message}"
+                    )));
+                }
+                other => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "unexpected apple helper response on write: {other:?}"
+                    )));
+                }
+            }
+        }
 
         let mut agent = HyperboxAgentClient::connect(self.config.agent_endpoint.clone())
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("connect agent: {e}")))?;
-
         agent
             .write_file(hyperbox_proto::hyperbox::v1::WriteFileRequest {
                 sandbox_id: sandbox_id.0.to_string(),
@@ -195,7 +418,6 @@ impl SandboxBackend for AppleVzBackend {
             })
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("write file via agent: {e}")))?;
-
         Ok(())
     }
 
@@ -207,11 +429,8 @@ impl SandboxBackend for AppleVzBackend {
             .remove(sandbox_id)
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
-        if let Some(child) = sandbox.vm_process.as_mut() {
-            child
-                .kill()
-                .await
-                .map_err(|e| HyperboxError::ExecutionFailed(format!("kill vm process: {e}")))?;
+        if let Some(helper) = sandbox.helper.as_mut() {
+            helper.shutdown(sandbox_id).await?;
         }
 
         Ok(())
@@ -222,7 +441,10 @@ impl SandboxBackend for AppleVzBackend {
             .lock()
             .await
             .get(sandbox_id)
-            .map(|sandbox| sandbox.info.clone())
+            .map(|sandbox| {
+                let _ = &sandbox.config;
+                sandbox.info.clone()
+            })
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
     }
 }
