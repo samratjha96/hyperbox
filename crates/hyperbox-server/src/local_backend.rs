@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use chrono::Utc;
 use hyperbox_core::{
@@ -37,6 +42,28 @@ impl LocalBackend {
 
     fn sandbox_workdir(&self, sandbox_id: &SandboxId) -> PathBuf {
         self.root_dir.join(sandbox_id.0.to_string())
+    }
+
+    fn validate_relative_path(path: &str) -> Result<&Path> {
+        let candidate = Path::new(path);
+        if candidate.is_absolute() {
+            return Err(HyperboxError::InvalidConfig(
+                "file path must be relative to sandbox working directory".to_string(),
+            ));
+        }
+
+        if candidate.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(HyperboxError::InvalidConfig(
+                "file path cannot escape sandbox working directory".to_string(),
+            ));
+        }
+
+        Ok(candidate)
     }
 }
 
@@ -171,7 +198,8 @@ impl SandboxBackend for LocalBackend {
             .cloned()
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
-        let full_path = record.working_dir.join(path);
+        let relative = Self::validate_relative_path(path)?;
+        let full_path = record.working_dir.join(relative);
         let bytes = fs::read(&full_path).await?;
 
         Ok(FilePayload {
@@ -191,7 +219,8 @@ impl SandboxBackend for LocalBackend {
             .cloned()
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
-        let full_path = record.working_dir.join(payload.path.as_str());
+        let relative = Self::validate_relative_path(payload.path.as_str())?;
+        let full_path = record.working_dir.join(relative);
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -331,5 +360,36 @@ mod tests {
             err.to_string().contains("does not enforce network policy"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn local_backend_rejects_path_traversal_file_io() {
+        let backend = LocalBackend::new(Some(
+            std::env::temp_dir().join("hyperbox-local-path-validation-test"),
+        ));
+        let lease = backend
+            .create(SandboxConfig::default())
+            .await
+            .expect("create sandbox");
+
+        let read_err = backend
+            .read_file(&lease.id, "../outside.txt")
+            .await
+            .expect_err("read should reject traversal");
+        assert!(read_err.to_string().contains("cannot escape"));
+
+        let write_err = backend
+            .write_file(
+                &lease.id,
+                FilePayload {
+                    path: "/tmp/outside.txt".into(),
+                    bytes: b"x".to_vec(),
+                },
+            )
+            .await
+            .expect_err("write should reject absolute paths");
+        assert!(write_err.to_string().contains("must be relative"));
+
+        backend.destroy(&lease.id).await.expect("destroy sandbox");
     }
 }
