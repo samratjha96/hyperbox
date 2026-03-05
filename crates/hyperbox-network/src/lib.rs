@@ -1,7 +1,14 @@
+pub mod firewall;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use hyperbox_core::NetworkMode;
+
+pub use firewall::{
+    CommandExecutor, CommandSpec, FirewallManager, RecordingExecutor, ShellExecutor, VmNetworkSpec,
+    build_apply_plan, build_teardown_plan,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

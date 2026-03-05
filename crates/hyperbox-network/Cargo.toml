@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
 regex.workspace = true
 serde.workspace = true
+tokio.workspace = true
 hyperbox-core = { path = "../hyperbox-core" }
