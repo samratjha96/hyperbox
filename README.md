@@ -2,26 +2,33 @@
 
 Secure, cross-platform sandbox runtime for AI-agent code execution.
 
-This repository contains the initial implementation of the architecture in `DESIGN.md`, with a modular Rust workspace and a minimal Python SDK wrapper.
+This repository implements the architecture in `DESIGN.md` as a modular Rust workspace with:
 
-## Workspace
+- shared sandbox traits and domain models
+- local execution backend for MVP behavior
+- Linux/macOS capability probes for VM backends
+- warm pool and metrics infrastructure
+- CLI and Python SDK
 
-- `crates/hyperbox-core`: shared types, traits, and policies
-- `crates/hyperbox-network`: network policy parsing/matching
-- `crates/hyperbox-agent`: agent protocol models
-- `crates/hyperbox-firecracker`: Linux backend capability scaffolding
-- `crates/hyperbox-apple`: macOS backend capability scaffolding
-- `crates/hyperbox-server`: runtime manager and pool
-- `crates/hyperbox-cli`: user CLI (`hyperbox`)
-- `hyperbox-py`: Python SDK shelling out to CLI
+## Layout
 
-## Current Status
+- `crates/hyperbox-core`: config, types, traits, templates, snapshots
+- `crates/hyperbox-network`: network allowlist parsing and matching
+- `crates/hyperbox-agent`: protocol schema for exec/file operations
+- `crates/hyperbox-firecracker`: Linux capability probe
+- `crates/hyperbox-apple`: macOS capability probe
+- `crates/hyperbox-server`: runtime manager, local backend, pool, metrics
+- `crates/hyperbox-cli`: `hyperbox` CLI
+- `hyperbox-py`: Python SDK wrapper
 
-The codebase ships an MVP architecture with a local backend, policy-aware execution API, template registry, capability probes, warm pool manager, metrics, and tests.
-
-## Build
+## Commands
 
 ```bash
 cargo build --workspace
 cargo test --workspace
+cargo run -p hyperbox-cli -- templates
+cargo run -p hyperbox-cli -- probe
+cargo run -p hyperbox-cli -- run --template python:3.12 --cmd "echo hello"
 ```
+
+See `docs/ARCHITECTURE.md` and `docs/QUICKSTART.md` for more detail.
