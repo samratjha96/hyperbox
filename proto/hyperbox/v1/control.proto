@@ -93,6 +93,20 @@ message MetricsResponse {
   uint64 p95_exec_ms = 6;
 }
 
+message ServerInfoRequest {}
+
+message ServerInfoResponse {
+  string server_version = 1;
+  string process_id = 2;
+  string executable_path = 3;
+  string started_at = 4;
+  string backend_requested = 5;
+  string backend_selected = 6;
+  string backend_reason = 7;
+  string apple_runtime = 8;
+  repeated string apple_helper_argv = 9;
+}
+
 message CreateSnapshotRequest {
   string sandbox_id = 1;
   string template = 2;
@@ -112,6 +126,30 @@ message RestoreSnapshotResponse {
   SandboxInfo info = 1;
 }
 
+message ShellOpenRequest {
+  string sandbox_id = 1;
+  repeated string command = 2;
+}
+
+message ShellCloseRequest {}
+
+message ShellRequest {
+  oneof payload {
+    ShellOpenRequest open = 1;
+    bytes stdin = 2;
+    ShellCloseRequest close = 3;
+  }
+}
+
+message ShellEvent {
+  oneof payload {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+    string error = 4;
+  }
+}
+
 enum NetworkMode {
   NETWORK_MODE_UNSPECIFIED = 0;
   NETWORK_MODE_NONE = 1;
@@ -128,6 +166,7 @@ service HyperboxControl {
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+  rpc GetServerInfo(ServerInfoRequest) returns (ServerInfoResponse);
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   rpc RestoreSnapshot(RestoreSnapshotRequest) returns (RestoreSnapshotResponse);
 }
@@ -136,4 +175,5 @@ service HyperboxAgent {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc Shell(stream ShellRequest) returns (stream ShellEvent);
 }

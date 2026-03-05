@@ -24,6 +24,7 @@ Each response is one JSON object per line written to helper stdout.
 - `create` launches detached container with:
   - `--network none`
   - workspace bind mount to `/workspace`
+  - deterministic container name `hyperbox-<sandbox_id>`
 - `exec` uses `container exec --workdir /workspace`
 - `read` and `write` use `container exec` (`cat` / `tee`)
 - `destroy` uses `container delete --force`

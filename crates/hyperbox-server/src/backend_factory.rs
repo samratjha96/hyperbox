@@ -30,42 +30,148 @@ impl BackendKind {
             _ => Self::Auto,
         }
     }
-}
 
-pub fn select_backend(kind: BackendKind) -> Arc<dyn SandboxBackend> {
-    match kind {
-        BackendKind::Local => Arc::new(LocalBackend::new(None)),
-        BackendKind::Firecracker => Arc::new(build_firecracker_backend()),
-        BackendKind::Apple => Arc::new(build_apple_backend()),
-        BackendKind::Auto => auto_backend(),
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Local => "local",
+            Self::Firecracker => "firecracker",
+            Self::Apple => "apple",
+        }
     }
 }
 
-fn auto_backend() -> Arc<dyn SandboxBackend> {
+pub struct BackendSelection {
+    pub requested: BackendKind,
+    pub selected: BackendKind,
+    pub reason: String,
+    pub apple_runtime: Option<AppleRuntimeKind>,
+    pub apple_helper_command: Option<Vec<String>>,
+    pub backend: Arc<dyn SandboxBackend>,
+}
+
+pub fn select_backend(kind: BackendKind) -> Arc<dyn SandboxBackend> {
+    resolve_backend(kind).backend
+}
+
+pub fn resolve_backend(kind: BackendKind) -> BackendSelection {
+    match kind {
+        BackendKind::Local => BackendSelection {
+            requested: kind,
+            selected: BackendKind::Local,
+            reason: "selected via HYPERBOX_BACKEND=local".to_string(),
+            apple_runtime: None,
+            apple_helper_command: None,
+            backend: Arc::new(LocalBackend::new(None)),
+        },
+        BackendKind::Firecracker => BackendSelection {
+            requested: kind,
+            selected: BackendKind::Firecracker,
+            reason: "selected via HYPERBOX_BACKEND=firecracker".to_string(),
+            apple_runtime: None,
+            apple_helper_command: None,
+            backend: Arc::new(build_firecracker_backend()),
+        },
+        BackendKind::Apple => {
+            let caps = detect_macos_capabilities();
+            let launch_command = resolve_apple_helper_command();
+            let runtime_kind = resolve_apple_runtime(&caps, launch_command.as_ref());
+            BackendSelection {
+                requested: kind,
+                selected: BackendKind::Apple,
+                reason: "selected via HYPERBOX_BACKEND=apple".to_string(),
+                apple_runtime: Some(runtime_kind),
+                apple_helper_command: launch_command.clone(),
+                backend: Arc::new(build_apple_backend_with_helper_and_runtime(
+                    launch_command,
+                    runtime_kind,
+                )),
+            }
+        }
+        BackendKind::Auto => auto_backend_selection(),
+    }
+}
+
+fn auto_backend_selection() -> BackendSelection {
     let os = std::env::consts::OS;
     match os {
         "linux" => {
             let caps = detect_linux_capabilities();
             if caps.supports_firecracker() {
-                Arc::new(build_firecracker_backend())
+                BackendSelection {
+                    requested: BackendKind::Auto,
+                    selected: BackendKind::Firecracker,
+                    reason: "auto selected firecracker: linux host supports KVM/firecracker"
+                        .to_string(),
+                    apple_runtime: None,
+                    apple_helper_command: None,
+                    backend: Arc::new(build_firecracker_backend()),
+                }
             } else {
-                Arc::new(LocalBackend::new(None))
+                BackendSelection {
+                    requested: BackendKind::Auto,
+                    selected: BackendKind::Local,
+                    reason: "auto selected local: linux host does not satisfy firecracker capability checks"
+                        .to_string(),
+                    apple_runtime: None,
+                    apple_helper_command: None,
+                    backend: Arc::new(LocalBackend::new(None)),
+                }
             }
         }
         "macos" => {
             let caps = detect_macos_capabilities();
             let helper_command = resolve_apple_helper_command();
-            if caps.supports_virtualization_framework
-                && helper_command
-                    .as_ref()
-                    .is_some_and(|cmd| apple_runtime_is_implemented_for_host(&caps, cmd))
-            {
-                Arc::new(build_apple_backend_with_helper(helper_command))
+            let runtime_kind = resolve_apple_runtime(&caps, helper_command.as_ref());
+
+            let supports_apple = caps.supports_virtualization_framework
+                && helper_command.as_ref().is_some_and(|cmd| {
+                    apple_runtime_is_implemented_for_host(&caps, cmd, runtime_kind)
+                });
+
+            if supports_apple {
+                BackendSelection {
+                    requested: BackendKind::Auto,
+                    selected: BackendKind::Apple,
+                    reason:
+                        "auto selected apple: host capabilities and helper support are available"
+                            .to_string(),
+                    apple_runtime: Some(runtime_kind),
+                    apple_helper_command: helper_command.clone(),
+                    backend: Arc::new(build_apple_backend_with_helper_and_runtime(
+                        helper_command,
+                        runtime_kind,
+                    )),
+                }
             } else {
-                Arc::new(LocalBackend::new(None))
+                let reason = if !caps.supports_virtualization_framework {
+                    "auto selected local: macOS host does not support virtualization framework"
+                        .to_string()
+                } else if helper_command.is_none() {
+                    "auto selected local: no apple helper command was discovered".to_string()
+                } else {
+                    "auto selected local: discovered apple helper/runtime is not supported on this host"
+                        .to_string()
+                };
+
+                BackendSelection {
+                    requested: BackendKind::Auto,
+                    selected: BackendKind::Local,
+                    reason,
+                    apple_runtime: Some(runtime_kind),
+                    apple_helper_command: helper_command,
+                    backend: Arc::new(LocalBackend::new(None)),
+                }
             }
         }
-        _ => Arc::new(LocalBackend::new(None)),
+        _ => BackendSelection {
+            requested: BackendKind::Auto,
+            selected: BackendKind::Local,
+            reason: format!("auto selected local: unsupported host OS `{os}`"),
+            apple_runtime: None,
+            apple_helper_command: None,
+            backend: Arc::new(LocalBackend::new(None)),
+        },
     }
 }
 
@@ -113,35 +219,10 @@ fn build_firecracker_backend() -> FirecrackerBackend {
     })
 }
 
-fn build_apple_backend() -> AppleVzBackend {
-    build_apple_backend_with_helper(resolve_apple_helper_command())
-}
-
-fn build_apple_backend_with_helper(launch_command: Option<Vec<String>>) -> AppleVzBackend {
-    let caps = detect_macos_capabilities();
-    let helper_is_builtin = launch_command
-        .as_ref()
-        .map(|cmd| is_builtin_apple_helper(cmd))
-        .unwrap_or(false);
-    let runtime_kind = match std::env::var("HYPERBOX_APPLE_RUNTIME")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "containerization" => AppleRuntimeKind::Containerization,
-        "virtualization" => AppleRuntimeKind::Virtualization,
-        _ => {
-            if caps.supports_containerization_framework {
-                AppleRuntimeKind::Containerization
-            } else if helper_is_builtin {
-                // Built-in helper currently only implements containerization runtime.
-                AppleRuntimeKind::Containerization
-            } else {
-                AppleRuntimeKind::Virtualization
-            }
-        }
-    };
-
+fn build_apple_backend_with_helper_and_runtime(
+    launch_command: Option<Vec<String>>,
+    runtime_kind: AppleRuntimeKind,
+) -> AppleVzBackend {
     AppleVzBackend::new(AppleBackendConfig {
         work_dir: std::env::var("HYPERBOX_APPLE_WORKDIR")
             .map(PathBuf::from)
@@ -151,6 +232,30 @@ fn build_apple_backend_with_helper(launch_command: Option<Vec<String>>) -> Apple
         launch_command,
         runtime_kind,
     })
+}
+
+fn resolve_apple_runtime(
+    caps: &hyperbox_apple::MacOsCapabilities,
+    launch_command: Option<&Vec<String>>,
+) -> AppleRuntimeKind {
+    match std::env::var("HYPERBOX_APPLE_RUNTIME")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "containerization" => AppleRuntimeKind::Containerization,
+        "virtualization" => AppleRuntimeKind::Virtualization,
+        _ => {
+            if caps.supports_containerization_framework {
+                AppleRuntimeKind::Containerization
+            } else if launch_command.is_some_and(|cmd| is_builtin_apple_helper(cmd)) {
+                // Built-in helper currently only implements containerization runtime.
+                AppleRuntimeKind::Containerization
+            } else {
+                AppleRuntimeKind::Virtualization
+            }
+        }
+    }
 }
 
 fn resolve_apple_helper_command() -> Option<Vec<String>> {
@@ -199,9 +304,11 @@ fn helper_command_supports_help(command: &[String]) -> bool {
 fn apple_runtime_is_implemented_for_host(
     caps: &hyperbox_apple::MacOsCapabilities,
     command: &[String],
+    runtime: AppleRuntimeKind,
 ) -> bool {
     if is_builtin_apple_helper(command) {
-        return caps.supports_containerization_framework;
+        return matches!(runtime, AppleRuntimeKind::Containerization)
+            && caps.supports_containerization_framework;
     }
     true
 }
@@ -214,7 +321,7 @@ fn is_builtin_apple_helper(command: &[String]) -> bool {
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
-    use hyperbox_apple::MacOsCapabilities;
+    use hyperbox_apple::{AppleRuntimeKind, MacOsCapabilities};
 
     use super::{
         apple_runtime_is_implemented_for_host, helper_command_supports_help,
@@ -268,7 +375,13 @@ mod tests {
 
         assert!(!apple_runtime_is_implemented_for_host(
             &caps,
-            &["hyperbox".to_string(), "apple-helper".to_string()]
+            &["hyperbox".to_string(), "apple-helper".to_string()],
+            AppleRuntimeKind::Containerization,
+        ));
+        assert!(!apple_runtime_is_implemented_for_host(
+            &caps,
+            &["hyperbox".to_string(), "apple-helper".to_string()],
+            AppleRuntimeKind::Virtualization,
         ));
     }
 }

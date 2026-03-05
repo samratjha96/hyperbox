@@ -1,11 +1,19 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use tokio::time::sleep;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::mpsc,
+    time::sleep,
+};
+use tokio_stream::wrappers::ReceiverStream;
 
 use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId};
+use hyperbox_proto::hyperbox::v1::{
+    self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
+};
 use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, serve_grpc};
 
 mod apple_helper;
@@ -80,6 +88,12 @@ enum Command {
         sandbox_id: String,
         #[arg(long, default_value_t = false)]
         json: bool,
+    },
+    Shell {
+        #[arg(long)]
+        sandbox_id: String,
+        #[arg(long, default_value = "/bin/sh")]
+        shell: String,
     },
     Templates {
         #[arg(long)]
@@ -238,6 +252,9 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 println!("{}", info.id.0);
             }
+        }
+        Command::Shell { sandbox_id, shell } => {
+            open_shell(cli.server_url, &sandbox_id, &shell).await?;
         }
         Command::Templates { disk_root } => {
             if let Some(root) = disk_root {
@@ -480,6 +497,169 @@ async fn run_existing_remote(
 
     emit_result(outcome, artifacts, json)?;
     Ok(())
+}
+
+async fn open_shell(
+    server_url: Option<String>,
+    sandbox_id: &str,
+    shell: &str,
+) -> anyhow::Result<()> {
+    let mut client = connect_client(server_url, false).await?;
+    let sandbox_id = parse_sandbox_id(sandbox_id)?;
+    let _ = client.inspect_sandbox(&sandbox_id).await?;
+    let server_info = match client.get_server_info().await {
+        Ok(info) => info,
+        Err(err) => {
+            if err.to_string().contains("Unimplemented") {
+                bail!(
+                    "server does not support GetServerInfo (likely stale daemon). Restart hyperbox server and retry `hyperbox shell`."
+                );
+            }
+            return Err(err);
+        }
+    };
+
+    if server_info.backend_selected != "apple" {
+        if server_info.backend_selected == "firecracker" {
+            return open_shell_via_agent_stream(&sandbox_id, shell).await;
+        }
+        bail!(
+            "interactive shell is currently supported for apple/firecracker backends; active backend is `{}`",
+            server_info.backend_selected
+        );
+    }
+
+    if !helper_argv_is_builtin_apple_helper(&server_info.apple_helper_argv) {
+        bail!(
+            "interactive shell is currently supported only for built-in apple helper sessions; active helper command is `{}`",
+            server_info.apple_helper_argv.join(" ")
+        );
+    }
+
+    let container_bin = extract_container_bin_from_helper_argv(&server_info.apple_helper_argv)
+        .unwrap_or_else(|| "container".to_string());
+    let status = std::process::Command::new(&container_bin)
+        .args([
+            "exec",
+            "--interactive",
+            "--workdir",
+            "/workspace",
+            &format!("hyperbox-{}", sandbox_id.0),
+            shell,
+        ])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| {
+            format!(
+                "launch interactive shell with `{container_bin}` into sandbox {}",
+                sandbox_id.0
+            )
+        })?;
+
+    if let Some(code) = status.code()
+        && code != 0
+    {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+async fn open_shell_via_agent_stream(sandbox_id: &SandboxId, shell: &str) -> anyhow::Result<()> {
+    let endpoint = std::env::var("HYPERBOX_AGENT_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:60061".to_string());
+    let mut agent = HyperboxAgentClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("connect hyperbox agent at {endpoint}"))?;
+
+    let (tx, rx) = mpsc::channel::<pb::ShellRequest>(64);
+    tx.send(pb::ShellRequest {
+        payload: Some(shell_request::Payload::Open(pb::ShellOpenRequest {
+            sandbox_id: sandbox_id.0.to_string(),
+            command: vec![shell.to_string()],
+        })),
+    })
+    .await
+    .context("send shell open request")?;
+    let response = agent
+        .shell(ReceiverStream::new(rx))
+        .await
+        .context("open agent shell stream")?;
+    let mut stream = response.into_inner();
+
+    let stdin_tx = tx;
+    let stdin_task = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            let read = stdin.read(&mut buf).await?;
+            if read == 0 {
+                break;
+            }
+            if stdin_tx
+                .send(pb::ShellRequest {
+                    payload: Some(shell_request::Payload::Stdin(buf[..read].to_vec())),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = stdin_tx
+            .send(pb::ShellRequest {
+                payload: Some(shell_request::Payload::Close(pb::ShellCloseRequest {})),
+            })
+            .await;
+        anyhow::Ok(())
+    });
+
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    while let Some(event) = stream.message().await.context("read shell stream event")? {
+        match event.payload {
+            Some(shell_event::Payload::Stdout(bytes)) => {
+                stdout.write_all(&bytes).await?;
+                stdout.flush().await?;
+            }
+            Some(shell_event::Payload::Stderr(bytes)) => {
+                stderr.write_all(&bytes).await?;
+                stderr.flush().await?;
+            }
+            Some(shell_event::Payload::Error(message)) => {
+                stderr.write_all(message.as_bytes()).await?;
+                stderr.write_all(b"\n").await?;
+                stderr.flush().await?;
+            }
+            Some(shell_event::Payload::ExitCode(code)) => {
+                stdin_task.abort();
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
+            None => {}
+        }
+    }
+
+    stdin_task.abort();
+    Ok(())
+}
+
+fn helper_argv_is_builtin_apple_helper(argv: &[String]) -> bool {
+    argv.len() >= 2 && argv[1] == "apple-helper"
+}
+
+fn extract_container_bin_from_helper_argv(argv: &[String]) -> Option<String> {
+    let mut idx = 0usize;
+    while idx < argv.len() {
+        if argv[idx] == "--container-bin" {
+            return argv.get(idx + 1).cloned();
+        }
+        idx += 1;
+    }
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -749,4 +929,35 @@ fn percentile(values: &[u128], p: usize) -> u128 {
     }
     let rank = ((values.len() * p).div_ceil(100)).saturating_sub(1);
     values[rank]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_container_bin_from_helper_argv, helper_argv_is_builtin_apple_helper};
+
+    #[test]
+    fn parses_container_bin_from_helper_args() {
+        let argv = vec![
+            "hyperbox".to_string(),
+            "apple-helper".to_string(),
+            "--container-bin".to_string(),
+            "/opt/bin/container".to_string(),
+        ];
+        assert_eq!(
+            extract_container_bin_from_helper_argv(&argv),
+            Some("/opt/bin/container".to_string())
+        );
+    }
+
+    #[test]
+    fn detects_builtin_helper_argv_shape() {
+        assert!(helper_argv_is_builtin_apple_helper(&[
+            "hyperbox".to_string(),
+            "apple-helper".to_string()
+        ]));
+        assert!(!helper_argv_is_builtin_apple_helper(&[
+            "custom-helper".to_string(),
+            "--foo".to_string()
+        ]));
+    }
 }

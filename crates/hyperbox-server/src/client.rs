@@ -6,6 +6,19 @@ pub struct GrpcControlClient {
     inner: HyperboxControlClient<tonic::transport::Channel>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ServerInfo {
+    pub server_version: String,
+    pub process_id: String,
+    pub executable_path: String,
+    pub started_at: String,
+    pub backend_requested: String,
+    pub backend_selected: String,
+    pub backend_reason: String,
+    pub apple_runtime: Option<String>,
+    pub apple_helper_argv: Vec<String>,
+}
+
 impl GrpcControlClient {
     pub async fn connect(endpoint: String) -> anyhow::Result<Self> {
         let inner = HyperboxControlClient::connect(endpoint).await?;
@@ -19,6 +32,29 @@ impl GrpcControlClient {
             .await?
             .into_inner();
         Ok(response.templates)
+    }
+
+    pub async fn get_server_info(&mut self) -> anyhow::Result<ServerInfo> {
+        let response = self
+            .inner
+            .get_server_info(pb::ServerInfoRequest {})
+            .await?
+            .into_inner();
+        Ok(ServerInfo {
+            server_version: response.server_version,
+            process_id: response.process_id,
+            executable_path: response.executable_path,
+            started_at: response.started_at,
+            backend_requested: response.backend_requested,
+            backend_selected: response.backend_selected,
+            backend_reason: response.backend_reason,
+            apple_runtime: if response.apple_runtime.is_empty() {
+                None
+            } else {
+                Some(response.apple_runtime)
+            },
+            apple_helper_argv: response.apple_helper_argv,
+        })
     }
 
     pub async fn create_sandbox(&mut self, config: SandboxConfig) -> anyhow::Result<SandboxInfo> {

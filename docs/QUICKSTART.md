@@ -38,6 +38,17 @@ cargo run -p hyperbox-cli -- run --sandbox-id "$SANDBOX_ID" --cmd "pytest -q"
 cargo run -p hyperbox-cli -- destroy --sandbox-id "$SANDBOX_ID"
 ```
 
+## Attach an interactive shell to a running sandbox
+
+```bash
+SANDBOX_ID=$(cargo run -p hyperbox-cli -- create --workspace "$PWD")
+cargo run -p hyperbox-cli -- shell --sandbox-id "$SANDBOX_ID"
+```
+
+Notes:
+- `shell` is supported for Apple backend sandboxes (built-in helper path) and Firecracker backend sandboxes (agent stream path).
+- `shell` is not available for local backend sandboxes.
+
 ## Run in proxy mode for agent adapters
 
 ```bash

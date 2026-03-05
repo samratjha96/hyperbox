@@ -9,11 +9,28 @@ use crate::HyperboxServer;
 #[derive(Clone)]
 pub struct GrpcControlService {
     runtime: HyperboxServer,
+    server_info: ServerRuntimeInfo,
+}
+
+#[derive(Clone)]
+pub struct ServerRuntimeInfo {
+    pub server_version: String,
+    pub process_id: u32,
+    pub executable_path: String,
+    pub started_at: String,
+    pub backend_requested: String,
+    pub backend_selected: String,
+    pub backend_reason: String,
+    pub apple_runtime: Option<String>,
+    pub apple_helper_argv: Vec<String>,
 }
 
 impl GrpcControlService {
-    pub fn new(runtime: HyperboxServer) -> Self {
-        Self { runtime }
+    pub fn new(runtime: HyperboxServer, server_info: ServerRuntimeInfo) -> Self {
+        Self {
+            runtime,
+            server_info,
+        }
     }
 }
 
@@ -271,6 +288,24 @@ impl HyperboxControl for GrpcControlService {
         Ok(Response::new(metrics.into()))
     }
 
+    async fn get_server_info(
+        &self,
+        _request: Request<pb::ServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfoResponse>, Status> {
+        debug!("grpc get_server_info request");
+        Ok(Response::new(pb::ServerInfoResponse {
+            server_version: self.server_info.server_version.clone(),
+            process_id: self.server_info.process_id.to_string(),
+            executable_path: self.server_info.executable_path.clone(),
+            started_at: self.server_info.started_at.clone(),
+            backend_requested: self.server_info.backend_requested.clone(),
+            backend_selected: self.server_info.backend_selected.clone(),
+            backend_reason: self.server_info.backend_reason.clone(),
+            apple_runtime: self.server_info.apple_runtime.clone().unwrap_or_default(),
+            apple_helper_argv: self.server_info.apple_helper_argv.clone(),
+        }))
+    }
+
     async fn create_snapshot(
         &self,
         request: Request<pb::CreateSnapshotRequest>,
@@ -330,11 +365,39 @@ impl HyperboxControl for GrpcControlService {
 }
 
 pub async fn serve_grpc(addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let backend_kind = crate::BackendKind::from_env();
-    info!(%addr, backend_kind = ?backend_kind, "starting grpc control service");
-    let backend = crate::select_backend(backend_kind);
+    let requested = crate::BackendKind::from_env();
+    let selection = crate::resolve_backend(requested);
+    info!(
+        %addr,
+        requested_backend = selection.requested.as_str(),
+        selected_backend = selection.selected.as_str(),
+        reason = %selection.reason,
+        "starting grpc control service"
+    );
+    let backend = selection.backend;
     let runtime = crate::HyperboxServer::new(backend);
-    let service = GrpcControlService::new(runtime);
+    let executable_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let service = GrpcControlService::new(
+        runtime,
+        ServerRuntimeInfo {
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            process_id: std::process::id(),
+            executable_path,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            backend_requested: selection.requested.as_str().to_string(),
+            backend_selected: selection.selected.as_str().to_string(),
+            backend_reason: selection.reason,
+            apple_runtime: selection.apple_runtime.map(|runtime| match runtime {
+                hyperbox_apple::AppleRuntimeKind::Containerization => {
+                    "containerization".to_string()
+                }
+                hyperbox_apple::AppleRuntimeKind::Virtualization => "virtualization".to_string(),
+            }),
+            apple_helper_argv: selection.apple_helper_command.unwrap_or_default(),
+        },
+    );
 
     tonic::transport::Server::builder()
         .add_service(pb::hyperbox_control_server::HyperboxControlServer::new(

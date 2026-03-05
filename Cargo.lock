@@ -620,6 +620,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
@@ -650,10 +651,12 @@ dependencies = [
  "hyperbox-apple",
  "hyperbox-core",
  "hyperbox-firecracker",
+ "hyperbox-proto",
  "hyperbox-server",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "uuid",
 ]
 
