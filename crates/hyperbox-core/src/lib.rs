@@ -12,4 +12,4 @@ pub use error::{HyperboxError, Result};
 pub use model::{ExecOutcome, ExecRequest, SandboxId, SandboxInfo, SandboxState, StreamEvent};
 pub use process::{ExecStatus, ExecTrace, StreamChunk, StreamName};
 pub use snapshot::{SnapshotId, SnapshotMetadata, SnapshotStore};
-pub use template::{Template, TemplateRegistry};
+pub use template::{Template, TemplateManifest, TemplateRegistry, load_template_manifests};

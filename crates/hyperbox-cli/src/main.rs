@@ -36,7 +36,10 @@ enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    Templates,
+    Templates {
+        #[arg(long)]
+        disk_root: Option<String>,
+    },
     Probe,
     Bench {
         #[arg(long, default_value = "python:3.12")]
@@ -97,8 +100,16 @@ async fn main() -> anyhow::Result<()> {
                 run_local(config, cmd, timeout, writes, reads, json).await?;
             }
         }
-        Command::Templates => {
-            if let Some(server_url) = cli.server_url {
+        Command::Templates { disk_root } => {
+            if let Some(root) = disk_root {
+                for manifest in hyperbox_core::load_template_manifests(std::path::Path::new(&root))?
+                {
+                    println!(
+                        "{}\t{}\t{}",
+                        manifest.name, manifest.rootfs, manifest.description
+                    );
+                }
+            } else if let Some(server_url) = cli.server_url {
                 let mut client = GrpcControlClient::connect(server_url).await?;
                 for template in client.list_templates().await? {
                     println!("{template}");

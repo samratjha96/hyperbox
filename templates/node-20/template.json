@@ -1,0 +1,1 @@
+{"name":"node:20","description":"Node.js 20 runtime","rootfs":"rootfs.ext4","kernel":null,"tags":["node","sandbox"]}

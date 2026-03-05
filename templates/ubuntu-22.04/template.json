@@ -1,0 +1,1 @@
+{"name":"ubuntu:22.04","description":"Ubuntu 22.04 base runtime","rootfs":"rootfs.ext4","kernel":null,"tags":["ubuntu","sandbox"]}

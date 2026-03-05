@@ -1,0 +1,1 @@
+{"name":"golang:1.22","description":"Go 1.22 runtime","rootfs":"rootfs.ext4","kernel":null,"tags":["go","sandbox"]}

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +8,15 @@ use crate::{HyperboxError, Result};
 pub struct Template {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TemplateManifest {
+    pub name: String,
+    pub description: String,
+    pub rootfs: String,
+    pub kernel: Option<String>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,8 +66,35 @@ impl TemplateRegistry {
     }
 }
 
+pub fn load_template_manifests(root: &Path) -> Result<Vec<TemplateManifest>> {
+    let mut manifests = Vec::new();
+
+    let entries = fs::read_dir(root)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let manifest_path = path.join("template.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+
+        let raw = fs::read_to_string(&manifest_path)?;
+        let manifest: TemplateManifest = serde_json::from_str(&raw)?;
+        manifests.push(manifest);
+    }
+
+    manifests.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(manifests)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
@@ -72,5 +108,22 @@ mod tests {
         let templates = TemplateRegistry::with_defaults();
         let err = templates.ensure_exists("missing:1").unwrap_err();
         assert_eq!(format!("{err}"), "template not found: missing:1");
+    }
+
+    #[test]
+    fn loads_manifests_from_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let t_dir = temp.path().join("python-3.12");
+        std::fs::create_dir_all(&t_dir).expect("create template dir");
+        let mut file = std::fs::File::create(t_dir.join("template.json")).expect("create manifest");
+        write!(
+            file,
+            "{{\"name\":\"python:3.12\",\"description\":\"Python\",\"rootfs\":\"rootfs.ext4\",\"kernel\":null,\"tags\":[\"python\"]}}"
+        )
+        .expect("write manifest");
+
+        let manifests = load_template_manifests(temp.path()).expect("load manifests");
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].name, "python:3.12");
     }
 }

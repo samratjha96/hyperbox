@@ -1,0 +1,1 @@
+{"name":"rust:1.75","description":"Rust toolchain runtime","rootfs":"rootfs.ext4","kernel":null,"tags":["rust","sandbox"]}
