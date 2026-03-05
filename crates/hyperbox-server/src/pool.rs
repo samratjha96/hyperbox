@@ -1,6 +1,8 @@
 use std::{
+    future::Future,
     collections::{HashSet, VecDeque},
     sync::Arc,
+    time::Duration,
 };
 
 use tokio::sync::Mutex;
@@ -63,6 +65,21 @@ impl<B: SandboxBackend> WarmPoolManager<B> {
         Ok(id)
     }
 
+    pub async fn checkout_or_restore<F, Fut>(&self, restore: F) -> Result<SandboxId>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<SandboxId>> + Send,
+    {
+        if let Some(id) = self.available.lock().await.pop_front() {
+            self.in_use.lock().await.insert(id.clone());
+            return Ok(id);
+        }
+
+        let restored = restore().await?;
+        self.in_use.lock().await.insert(restored.clone());
+        Ok(restored)
+    }
+
     pub async fn release(&self, id: SandboxId) {
         let mut in_use = self.in_use.lock().await;
         if in_use.remove(&id) {
@@ -78,11 +95,22 @@ impl<B: SandboxBackend> WarmPoolManager<B> {
             target: self.target_size,
         }
     }
+
+    pub fn start_auto_refill(self: Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let _ = self.fill().await;
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperbox_core::SandboxId;
+
     use crate::LocalBackend;
 
     #[tokio::test]
@@ -100,5 +128,20 @@ mod tests {
         assert_eq!(stats.target, 2);
         assert_eq!(stats.in_use, 0);
         assert!(stats.available >= 1);
+    }
+
+    #[tokio::test]
+    async fn checkout_or_restore_calls_restore_when_empty() {
+        let backend = Arc::new(LocalBackend::new(Some(
+            std::env::temp_dir().join("hyperbox-pool-restore-test"),
+        )));
+        let pool = WarmPoolManager::new(backend, SandboxConfig::default(), 0);
+
+        let id = pool
+            .checkout_or_restore(|| async { Ok(SandboxId::new()) })
+            .await
+            .expect("checkout or restore");
+
+        assert_ne!(id.0, uuid::Uuid::nil());
     }
 }
