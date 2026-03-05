@@ -76,16 +76,38 @@ pub fn resolve_backend(kind: BackendKind) -> BackendSelection {
             let caps = detect_macos_capabilities();
             let launch_command = resolve_apple_helper_command();
             let runtime_kind = resolve_apple_runtime(&caps, launch_command.as_ref());
-            BackendSelection {
-                requested: kind,
-                selected: BackendKind::Apple,
-                reason: "selected via HYPERBOX_BACKEND=apple".to_string(),
-                apple_runtime: Some(runtime_kind),
-                apple_helper_command: launch_command.clone(),
-                backend: Arc::new(build_apple_backend_with_helper_and_runtime(
-                    launch_command,
-                    runtime_kind,
-                )),
+            let supported = caps.supports_virtualization_framework
+                && launch_command.as_ref().is_some_and(|cmd| {
+                    apple_runtime_is_implemented_for_host(&caps, cmd, runtime_kind)
+                });
+            if supported {
+                BackendSelection {
+                    requested: kind,
+                    selected: BackendKind::Apple,
+                    reason: "selected via HYPERBOX_BACKEND=apple".to_string(),
+                    apple_runtime: Some(runtime_kind),
+                    apple_helper_command: launch_command.clone(),
+                    backend: Arc::new(build_apple_backend_with_helper_and_runtime(
+                        launch_command,
+                        runtime_kind,
+                    )),
+                }
+            } else {
+                let reason = if !caps.supports_virtualization_framework {
+                    "requested apple backend but host lacks virtualization framework support; falling back to local backend".to_string()
+                } else if launch_command.is_none() {
+                    "requested apple backend but no helper command was discovered; falling back to local backend".to_string()
+                } else {
+                    "requested apple backend but helper/runtime is not supported on this host; falling back to local backend".to_string()
+                };
+                BackendSelection {
+                    requested: kind,
+                    selected: BackendKind::Local,
+                    reason,
+                    apple_runtime: Some(runtime_kind),
+                    apple_helper_command: launch_command,
+                    backend: Arc::new(LocalBackend::new(None)),
+                }
             }
         }
         BackendKind::Auto => auto_backend_selection(),

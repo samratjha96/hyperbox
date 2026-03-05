@@ -211,7 +211,9 @@ impl HyperboxAgent for AgentService {
 
             if command.is_empty() {
                 let _ = tx
-                    .send(Err(Status::invalid_argument("shell command cannot be empty")))
+                    .send(Err(Status::invalid_argument(
+                        "shell command cannot be empty",
+                    )))
                     .await;
                 return;
             }

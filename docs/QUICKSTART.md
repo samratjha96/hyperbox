@@ -46,8 +46,8 @@ cargo run -p hyperbox-cli -- shell --sandbox-id "$SANDBOX_ID"
 ```
 
 Notes:
-- `shell` is supported for Apple backend sandboxes (built-in helper path) and Firecracker backend sandboxes (agent stream path).
-- `shell` is not available for local backend sandboxes.
+- `shell` is supported for Apple backend sandboxes (built-in helper path), Firecracker backend sandboxes (agent stream path), and local backend sandboxes.
+- If Apple backend is requested but not runnable on the host (for example missing helper/runtime support), server falls back to local backend automatically.
 
 ## Run in proxy mode for agent adapters
 

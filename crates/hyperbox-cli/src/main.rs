@@ -504,7 +504,8 @@ async fn open_shell(
     sandbox_id: &str,
     shell: &str,
 ) -> anyhow::Result<()> {
-    let mut client = connect_client(server_url, false).await?;
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
     let sandbox_id = parse_sandbox_id(sandbox_id)?;
     let _ = client.inspect_sandbox(&sandbox_id).await?;
     let server_info = match client.get_server_info().await {
@@ -519,12 +520,15 @@ async fn open_shell(
         }
     };
 
+    if server_info.backend_selected == "firecracker" {
+        return open_shell_via_agent_stream(&sandbox_id, shell).await;
+    }
+    if server_info.backend_selected == "local" {
+        return open_shell_local(&mut client, &sandbox_id, shell).await;
+    }
     if server_info.backend_selected != "apple" {
-        if server_info.backend_selected == "firecracker" {
-            return open_shell_via_agent_stream(&sandbox_id, shell).await;
-        }
         bail!(
-            "interactive shell is currently supported for apple/firecracker backends; active backend is `{}`",
+            "interactive shell is not supported for backend `{}`",
             server_info.backend_selected
         );
     }
@@ -558,6 +562,47 @@ async fn open_shell(
             )
         })?;
 
+    if let Some(code) = status.code()
+        && code != 0
+    {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+async fn open_shell_local(
+    client: &mut GrpcControlClient,
+    sandbox_id: &SandboxId,
+    shell: &str,
+) -> anyhow::Result<()> {
+    let probe = client
+        .exec(
+            sandbox_id,
+            ExecRequest {
+                command: vec!["/bin/sh".to_string(), "-lc".to_string(), "pwd".to_string()],
+                timeout_secs: 10,
+            },
+        )
+        .await
+        .context("probe sandbox working directory")?;
+    if probe.exit_code != 0 {
+        bail!(
+            "failed to resolve local sandbox working directory: {}",
+            probe.stderr
+        );
+    }
+    let workdir = probe.stdout.lines().next().unwrap_or_default().trim();
+    if workdir.is_empty() {
+        bail!("failed to resolve local sandbox working directory: empty output");
+    }
+
+    let status = std::process::Command::new(shell)
+        .current_dir(workdir)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("launch local interactive shell in `{workdir}`"))?;
     if let Some(code) = status.code()
         && code != 0
     {
