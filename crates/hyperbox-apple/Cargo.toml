@@ -7,4 +7,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+hyperbox-core = { path = "../hyperbox-core" }
+hyperbox-proto = { path = "../hyperbox-proto" }
 serde.workspace = true
+tokio.workspace = true
+tonic = { version = "0.12", features = ["transport"] }
