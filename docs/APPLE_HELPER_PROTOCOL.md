@@ -12,6 +12,8 @@ export HYPERBOX_APPLE_RUNTIME=containerization   # or virtualization
 export HYPERBOX_APPLE_HELPER="hyperbox apple-helper"
 ```
 
+For default `hyperbox` CLI usage, helper wiring is auto-discovered (current executable `apple-helper`, then `hyperbox apple-helper` in PATH). Set `HYPERBOX_APPLE_HELPER` only when overriding.
+
 Each request is one JSON object per line written to helper stdin.
 Each response is one JSON object per line written to helper stdout.
 

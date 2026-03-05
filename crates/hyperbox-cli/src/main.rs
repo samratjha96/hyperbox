@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId};
+use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId};
 use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, serve_grpc};
 
 mod apple_helper;
@@ -178,11 +178,7 @@ async fn main() -> anyhow::Result<()> {
                 ..SandboxConfig::default()
             };
 
-            if let Some(server_url) = cli.server_url {
-                run_remote(server_url, config, cmd, timeout, writes, reads, json).await?;
-            } else {
-                run_local(config, cmd, timeout, writes, reads, json).await?;
-            }
+            run_remote(cli.server_url, config, cmd, timeout, writes, reads, json).await?;
         }
         Command::Create {
             template,
@@ -373,11 +369,6 @@ fn spawn_local_server() -> anyhow::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    // Auto-start should always be functional on a dev host; default to local backend unless caller explicitly set one.
-    if std::env::var_os("HYPERBOX_BACKEND").is_none() {
-        cmd.env("HYPERBOX_BACKEND", "local");
-    }
-
     cmd.spawn().context("auto-start local server process")?;
     Ok(())
 }
@@ -406,56 +397,8 @@ async fn connect_client(
         .with_context(|| format!("failed to connect to hyperbox control plane at {url}"))
 }
 
-async fn run_local(
-    config: SandboxConfig,
-    cmd: String,
-    timeout: u64,
-    writes: Vec<String>,
-    reads: Vec<String>,
-    json: bool,
-) -> anyhow::Result<()> {
-    let backend = Arc::new(LocalBackend::new(None));
-    let server = HyperboxServer::new(backend);
-    let sandbox = server.create_sandbox(config).await?;
-
-    for entry in writes {
-        let (path, content) = entry
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
-        server
-            .write_file(
-                &sandbox.id,
-                FilePayload {
-                    path: path.to_string().into(),
-                    bytes: content.as_bytes().to_vec(),
-                },
-            )
-            .await?;
-    }
-
-    let outcome = server
-        .exec(
-            &sandbox.id,
-            ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
-                timeout_secs: timeout,
-            },
-        )
-        .await?;
-
-    let mut artifacts = Vec::new();
-    for path in reads {
-        let payload = server.read_file(&sandbox.id, &path).await?;
-        artifacts.push((path, String::from_utf8_lossy(&payload.bytes).to_string()));
-    }
-
-    emit_result(outcome, artifacts, json)?;
-    server.destroy_sandbox(&sandbox.id).await?;
-    Ok(())
-}
-
 async fn run_remote(
-    server_url: String,
+    server_url: Option<String>,
     config: SandboxConfig,
     cmd: String,
     timeout: u64,
@@ -463,7 +406,8 @@ async fn run_remote(
     reads: Vec<String>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let mut client = GrpcControlClient::connect(server_url).await?;
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
     let sandbox = client.create_sandbox(config).await?;
 
     for entry in writes {
@@ -505,7 +449,8 @@ async fn run_existing_remote(
     reads: Vec<String>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let mut client = connect_client(server_url, false).await?;
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
     let sandbox_id = parse_sandbox_id(&sandbox_id)?;
 
     for entry in writes {

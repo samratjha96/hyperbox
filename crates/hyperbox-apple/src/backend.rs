@@ -212,10 +212,18 @@ impl SandboxBackend for AppleVzBackend {
         if matches!(self.config.runtime_kind, AppleRuntimeKind::Containerization)
             && !detect_macos_capabilities().supports_containerization_framework
         {
-            return Err(HyperboxError::InvalidConfig(
+            let helper_is_builtin = self
+                .config
+                .launch_command
+                .as_ref()
+                .is_some_and(|cmd| cmd.len() >= 2 && cmd[1] == "apple-helper");
+            let message = if helper_is_builtin {
+                "apple built-in helper currently supports only containerization runtime, but this host does not support Apple Containerization framework; set HYPERBOX_BACKEND=local or configure an external virtualization-capable helper via HYPERBOX_APPLE_HELPER".to_string()
+            } else {
                 "apple containerization runtime requested but not available on this host"
-                    .to_string(),
-            ));
+                    .to_string()
+            };
+            return Err(HyperboxError::InvalidConfig(message));
         }
 
         tokio::fs::create_dir_all(&self.config.work_dir).await?;

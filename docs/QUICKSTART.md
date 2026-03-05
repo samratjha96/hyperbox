@@ -18,6 +18,12 @@ cargo test --workspace
 cargo run -p hyperbox-cli -- run --template python:3.12 --workspace "$PWD" --cmd "python3 -c 'print(2 + 2)'"
 ```
 
+Default behavior:
+- `hyperbox run/create/proxy` now go through the control-plane server path by default (not direct local backend calls).
+- Backend selection is `auto` by default.
+- On macOS, Apple backend is auto-selected only when the selected helper can run on this host (today: built-in helper requires Containerization framework support); otherwise auto falls back to local backend.
+- Overrides remain available for power users through `HYPERBOX_BACKEND`, `HYPERBOX_APPLE_RUNTIME`, and `HYPERBOX_APPLE_HELPER`.
+
 ## Keep a persistent sandbox for an agent workflow
 
 ```bash
