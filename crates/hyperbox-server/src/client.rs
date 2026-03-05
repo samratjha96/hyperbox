@@ -94,4 +94,36 @@ impl GrpcControlClient {
             .await?;
         Ok(())
     }
+
+    pub async fn write_file(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+        path: String,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .write_file(pb::WriteFileRequest {
+                sandbox_id: sandbox_id.0.to_string(),
+                path,
+                bytes,
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn read_file(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+        path: String,
+    ) -> anyhow::Result<Vec<u8>> {
+        let response = self
+            .inner
+            .read_file(pb::ReadFileRequest {
+                sandbox_id: sandbox_id.0.to_string(),
+                path,
+            })
+            .await?
+            .into_inner();
+        Ok(response.bytes)
+    }
 }
