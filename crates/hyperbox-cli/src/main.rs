@@ -8,6 +8,8 @@ use tokio::time::sleep;
 use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId};
 use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, serve_grpc};
 
+mod apple_helper;
+
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50051";
 const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:50051";
 const SERVER_STARTUP_RETRIES: usize = 20;
@@ -99,6 +101,12 @@ enum Command {
         timeout: u64,
         #[arg(long)]
         workspace: Option<String>,
+    },
+    AppleHelper {
+        #[arg(long, default_value = "container")]
+        container_bin: String,
+        #[arg(long)]
+        state_root: Option<String>,
     },
     Bench {
         #[arg(long, default_value = "python:3.12")]
@@ -297,6 +305,19 @@ async fn main() -> anyhow::Result<()> {
                     ..SandboxConfig::default()
                 },
             )
+            .await?;
+        }
+        Command::AppleHelper {
+            container_bin,
+            state_root,
+        } => {
+            let state_root = state_root
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("hyperbox-apple-helper"));
+            apple_helper::run(apple_helper::AppleHelperConfig {
+                container_bin,
+                state_root,
+            })
             .await?;
         }
         Command::Bench {

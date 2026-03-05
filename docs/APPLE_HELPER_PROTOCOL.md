@@ -9,11 +9,26 @@ Configure helper command:
 ```bash
 export HYPERBOX_BACKEND=apple
 export HYPERBOX_APPLE_RUNTIME=containerization   # or virtualization
-export HYPERBOX_APPLE_HELPER="/path/to/hyperbox-apple-helper"
+export HYPERBOX_APPLE_HELPER="hyperbox apple-helper"
 ```
 
 Each request is one JSON object per line written to helper stdin.
 Each response is one JSON object per line written to helper stdout.
+
+## Built-in helper behavior
+
+`hyperbox apple-helper` currently implements runtime operations through Apple `container` CLI:
+
+- `create` launches detached container with:
+  - `--network none`
+  - workspace bind mount to `/workspace`
+- `exec` uses `container exec --workdir /workspace`
+- `read` and `write` use `container exec` (`cat` / `tee`)
+- `destroy` uses `container delete --force`
+
+Current limitation:
+- runtime `containerization` is implemented.
+- runtime `virtualization` returns an error (dedicated Virtualization.framework helper is not yet implemented).
 
 ## Requests
 
