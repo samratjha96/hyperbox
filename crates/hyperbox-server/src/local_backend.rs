@@ -11,6 +11,7 @@ use tokio::{
     sync::Mutex,
     time::{Duration, timeout},
 };
+use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
 struct SandboxRecord {
@@ -61,6 +62,12 @@ impl SandboxBackend for LocalBackend {
         };
 
         self.state.lock().await.insert(id.clone(), record);
+        info!(
+            sandbox_id = %id.0,
+            template = %info.template,
+            workdir = %self.sandbox_workdir(&id).display(),
+            "local backend sandbox created"
+        );
 
         Ok(SandboxLease { id, info })
     }
@@ -83,6 +90,12 @@ impl SandboxBackend for LocalBackend {
                 "command cannot be empty".to_string(),
             ));
         }
+        debug!(
+            sandbox_id = %sandbox_id.0,
+            command = %req.command.join(" "),
+            timeout_secs = req.timeout_secs,
+            "local backend exec"
+        );
 
         let program = &req.command[0];
         let args = &req.command[1..];
@@ -107,6 +120,12 @@ impl SandboxBackend for LocalBackend {
             .map_err(|_| HyperboxError::ExecutionFailed("command timed out".to_string()))??;
 
         let duration_ms = start.elapsed().as_millis();
+        info!(
+            sandbox_id = %sandbox_id.0,
+            exit_code = output.status.code().unwrap_or(1),
+            duration_ms,
+            "local backend exec completed"
+        );
 
         Ok(hyperbox_core::ExecOutcome {
             exit_code: output.status.code().unwrap_or(1),
@@ -164,6 +183,7 @@ impl SandboxBackend for LocalBackend {
         if record.working_dir.exists() {
             fs::remove_dir_all(record.working_dir).await?;
         }
+        info!(sandbox_id = %sandbox_id.0, "local backend sandbox destroyed");
 
         Ok(())
     }

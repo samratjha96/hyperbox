@@ -7,6 +7,7 @@ use tokio::{
     time::{Duration, timeout},
 };
 use tonic::{Request, Response, Status};
+use tracing::{debug, error, info, warn};
 
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_agent_server::HyperboxAgent};
 
@@ -40,6 +41,7 @@ impl AgentService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         sandboxes.insert(sandbox_id.to_string(), AgentSandbox { root: dir.clone() });
+        info!(sandbox_id = %sandbox_id, root = %dir.display(), "agent sandbox root initialized");
         Ok(dir)
     }
 }
@@ -50,6 +52,7 @@ impl HyperboxAgent for AgentService {
         &self,
         request: Request<pb::ExecRequest>,
     ) -> Result<Response<pb::ExecResponse>, Status> {
+        let peer = request.remote_addr();
         let request = request.into_inner();
 
         if request.command.is_empty() {
@@ -61,6 +64,13 @@ impl HyperboxAgent for AgentService {
         } else {
             request.sandbox_id.as_str()
         };
+        info!(
+            peer = ?peer,
+            sandbox_id = %sandbox_id,
+            timeout_secs = request.timeout_secs,
+            command = %request.command.join(" "),
+            "agent exec request"
+        );
         let root = self.sandbox_root(sandbox_id).await?;
 
         let mut command = Command::new(&request.command[0]);
@@ -72,14 +82,28 @@ impl HyperboxAgent for AgentService {
             command.output(),
         )
         .await
-        .map_err(|_| Status::deadline_exceeded("command timed out"))?
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|_| {
+            warn!(peer = ?peer, sandbox_id = %sandbox_id, "agent exec timeout");
+            Status::deadline_exceeded("command timed out")
+        })?
+        .map_err(|e| {
+            error!(peer = ?peer, sandbox_id = %sandbox_id, error = %e, "agent exec process failure");
+            Status::internal(e.to_string())
+        })?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        info!(
+            peer = ?peer,
+            sandbox_id = %sandbox_id,
+            exit_code = output.status.code().unwrap_or(1),
+            duration_ms,
+            "agent exec completed"
+        );
 
         Ok(Response::new(pb::ExecResponse {
             exit_code: output.status.code().unwrap_or(1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            duration_ms: start.elapsed().as_millis() as u64,
+            duration_ms,
         }))
     }
 
@@ -87,12 +111,14 @@ impl HyperboxAgent for AgentService {
         &self,
         request: Request<pb::ReadFileRequest>,
     ) -> Result<Response<pb::ReadFileResponse>, Status> {
+        let peer = request.remote_addr();
         let request = request.into_inner();
         let sandbox_id = if request.sandbox_id.is_empty() {
             "default"
         } else {
             request.sandbox_id.as_str()
         };
+        debug!(peer = ?peer, sandbox_id = %sandbox_id, path = %request.path, "agent read_file request");
         let root = self.sandbox_root(sandbox_id).await?;
         let full = root.join(request.path);
 
@@ -106,12 +132,20 @@ impl HyperboxAgent for AgentService {
         &self,
         request: Request<pb::WriteFileRequest>,
     ) -> Result<Response<pb::WriteFileResponse>, Status> {
+        let peer = request.remote_addr();
         let request = request.into_inner();
         let sandbox_id = if request.sandbox_id.is_empty() {
             "default"
         } else {
             request.sandbox_id.as_str()
         };
+        debug!(
+            peer = ?peer,
+            sandbox_id = %sandbox_id,
+            path = %request.path,
+            bytes = request.bytes.len(),
+            "agent write_file request"
+        );
         let root = self.sandbox_root(sandbox_id).await?;
         let full = root.join(request.path);
 

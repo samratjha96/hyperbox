@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use hyperbox_core::{
     ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId,
@@ -46,18 +47,42 @@ impl HyperboxServer {
 
     pub async fn create_sandbox(&self, config: SandboxConfig) -> Result<SandboxInfo> {
         self.templates.ensure_exists(&config.template)?;
+        info!(
+            template = %config.template,
+            memory_mb = config.memory_mb,
+            vcpu_count = config.vcpu_count,
+            "runtime create_sandbox"
+        );
         let lease = self.backend.create(config.clone()).await?;
         self.sandboxes.lock().await.insert(lease.id.clone(), config);
         self.metrics.inc_create();
+        info!(sandbox_id = %lease.id.0, template = %lease.info.template, "runtime sandbox created");
         Ok(lease.info)
     }
 
     pub async fn exec(&self, sandbox_id: &SandboxId, request: ExecRequest) -> Result<ExecOutcome> {
+        debug!(
+            sandbox_id = %sandbox_id.0,
+            timeout_secs = request.timeout_secs,
+            command = %request.command.join(" "),
+            "runtime exec"
+        );
         self.metrics.inc_exec();
         let outcome = self.backend.exec(sandbox_id, request).await;
         match &outcome {
-            Ok(outcome) => self.metrics.record_exec_latency(outcome.duration_ms).await,
-            Err(_) => self.metrics.inc_exec_failure(),
+            Ok(outcome) => {
+                self.metrics.record_exec_latency(outcome.duration_ms).await;
+                info!(
+                    sandbox_id = %sandbox_id.0,
+                    exit_code = outcome.exit_code,
+                    duration_ms = outcome.duration_ms,
+                    "runtime exec completed"
+                );
+            }
+            Err(err) => {
+                self.metrics.inc_exec_failure();
+                warn!(sandbox_id = %sandbox_id.0, error = %err, "runtime exec failed");
+            }
         }
         outcome
     }
@@ -75,9 +100,11 @@ impl HyperboxServer {
     }
 
     pub async fn destroy_sandbox(&self, sandbox_id: &SandboxId) -> Result<()> {
+        info!(sandbox_id = %sandbox_id.0, "runtime destroy_sandbox");
         self.backend.destroy(sandbox_id).await?;
         self.sandboxes.lock().await.remove(sandbox_id);
         self.metrics.inc_destroy();
+        info!(sandbox_id = %sandbox_id.0, "runtime sandbox destroyed");
         Ok(())
     }
 
@@ -94,6 +121,7 @@ impl HyperboxServer {
         sandbox_id: &SandboxId,
         note: Option<String>,
     ) -> Result<SnapshotMetadata> {
+        info!(sandbox_id = %sandbox_id.0, note = ?note, "runtime create_snapshot");
         let sandbox = self
             .sandboxes
             .lock()
@@ -106,9 +134,14 @@ impl HyperboxServer {
         self.snapshots
             .create_snapshot(sandbox_id, &sandbox.template, note)
             .await
+            .map(|snapshot| {
+                info!(sandbox_id = %sandbox_id.0, snapshot_id = %snapshot.id.0, "runtime snapshot created");
+                snapshot
+            })
     }
 
     pub async fn restore_snapshot(&self, snapshot_id: &SnapshotId) -> Result<SandboxInfo> {
+        warn!(snapshot_id = %snapshot_id.0, "runtime restore_snapshot requested");
         let snapshot = self
             .snapshots
             .get_snapshot(snapshot_id)
@@ -122,6 +155,10 @@ impl HyperboxServer {
             ..SandboxConfig::default()
         })
         .await
+        .map(|info| {
+            warn!(snapshot_id = %snapshot_id.0, sandbox_id = %info.id.0, "runtime restore_snapshot created replacement sandbox");
+            info
+        })
     }
 
     pub async fn list_snapshots(&self, template: &str) -> Result<Vec<SnapshotMetadata>> {
