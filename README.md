@@ -45,6 +45,38 @@ cargo run -p hyperbox-cli -- --server-url http://127.0.0.1:50051 bench --templat
 
 See `docs/ARCHITECTURE.md` and `docs/QUICKSTART.md` for more detail.
 
+## Benchmarks
+
+Measured on **March 5, 2026** on **macOS 26.3 (Apple Silicon)** with:
+- `target/release/hyperbox`
+- Apple backend (`HYPERBOX_BACKEND=auto`, `HYPERBOX_APPLE_RUNTIME=containerization`)
+- pre-pulled `alpine:3.20` for Docker comparison
+- 30 measured runs, 5 warmup runs
+
+### End-to-end startup (new sandbox/container each run)
+
+| Command | mean | p50 | p95 |
+| --- | ---:| ---:| ---:|
+| `hyperbox shell --shell /bin/true --workspace "$PWD"` | 981.66 ms | 971.65 ms | 1084.58 ms |
+| `docker run --rm --pull=never alpine:3.20 true` | 204.92 ms | 199.03 ms | 272.46 ms |
+
+### Steady-state exec (reused sandbox/container)
+
+| Command | mean | p50 | p95 |
+| --- | ---:| ---:| ---:|
+| `hyperbox shell --sandbox-id <id> --shell /bin/true` | 75.57 ms | 71.31 ms | 100.88 ms |
+| `docker exec <container> true` | 45.57 ms | 44.67 ms | 52.48 ms |
+
+### Reproduce
+
+```bash
+# Hyperbox (ephemeral)
+./target/release/hyperbox shell --shell /bin/true --workspace "$PWD"
+
+# Docker baseline (smallest practical image)
+docker run --rm --pull=never alpine:3.20 true
+```
+
 ## Network Policy Enforcement
 
 - `network=allowlist` is treated as an enforce-or-fail feature.
