@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId,
-    SandboxInfo, TemplateRegistry,
+    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
+    SnapshotId, SnapshotMetadata, SnapshotStore, TemplateRegistry,
 };
 
 use crate::metrics::{MetricsCollector, MetricsSnapshot};
@@ -15,15 +15,24 @@ pub struct HyperboxServer {
     templates: TemplateRegistry,
     sandboxes: Arc<Mutex<HashMap<SandboxId, SandboxConfig>>>,
     metrics: MetricsCollector,
+    snapshots: Arc<dyn SnapshotStore>,
 }
 
 impl HyperboxServer {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
+        Self::new_with_snapshots(backend, Arc::new(crate::InMemorySnapshotStore::default()))
+    }
+
+    pub fn new_with_snapshots(
+        backend: Arc<dyn SandboxBackend>,
+        snapshots: Arc<dyn SnapshotStore>,
+    ) -> Self {
         Self {
             backend,
             templates: TemplateRegistry::with_defaults(),
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
             metrics: MetricsCollector::default(),
+            snapshots,
         }
     }
 
@@ -78,6 +87,41 @@ impl HyperboxServer {
 
     pub async fn metrics(&self) -> MetricsSnapshot {
         self.metrics.snapshot().await
+    }
+
+    pub async fn create_snapshot(
+        &self,
+        sandbox_id: &SandboxId,
+        note: Option<String>,
+    ) -> Result<SnapshotMetadata> {
+        let sandbox = self
+            .sandboxes
+            .lock()
+            .await
+            .get(sandbox_id)
+            .cloned()
+            .ok_or_else(|| hyperbox_core::HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+        self.snapshots
+            .create_snapshot(sandbox_id, &sandbox.template, note)
+            .await
+    }
+
+    pub async fn restore_snapshot(&self, snapshot_id: &SnapshotId) -> Result<SandboxInfo> {
+        let snapshot = self
+            .snapshots
+            .get_snapshot(snapshot_id)
+            .await?
+            .ok_or_else(|| hyperbox_core::HyperboxError::ExecutionFailed("snapshot not found".to_string()))?;
+
+        self.create_sandbox(SandboxConfig {
+            template: snapshot.template,
+            ..SandboxConfig::default()
+        })
+        .await
+    }
+
+    pub async fn list_snapshots(&self, template: &str) -> Result<Vec<SnapshotMetadata>> {
+        self.snapshots.list_for_template(template).await
     }
 }
 

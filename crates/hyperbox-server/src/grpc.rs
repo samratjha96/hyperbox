@@ -1,24 +1,23 @@
 use tonic::{Request, Response, Status};
 
 use hyperbox_core::{
-    ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId, SnapshotMetadata, SnapshotStore,
+    ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId, SnapshotId,
 };
 use hyperbox_proto::hyperbox::v1::{
     self as pb,
     hyperbox_control_server::HyperboxControl,
 };
 
-use crate::{HyperboxServer, InMemorySnapshotStore};
+use crate::HyperboxServer;
 
 #[derive(Clone)]
 pub struct GrpcControlService {
     runtime: HyperboxServer,
-    snapshots: InMemorySnapshotStore,
 }
 
 impl GrpcControlService {
-    pub fn new(runtime: HyperboxServer, snapshots: InMemorySnapshotStore) -> Self {
-        Self { runtime, snapshots }
+    pub fn new(runtime: HyperboxServer) -> Self {
+        Self { runtime }
     }
 }
 
@@ -218,22 +217,11 @@ impl HyperboxControl for GrpcControlService {
     ) -> Result<Response<pb::CreateSnapshotResponse>, Status> {
         let request = request.into_inner();
         let sandbox_id = parse_sandbox_id(&request.sandbox_id)?;
-        let template = if request.template.is_empty() {
-            "python:3.12".to_string()
-        } else {
-            request.template
-        };
-
         let snapshot = self
-            .snapshots
+            .runtime
             .create_snapshot(
                 &sandbox_id,
-                &template,
-                if request.note.is_empty() {
-                    None
-                } else {
-                    Some(request.note)
-                },
+                if request.note.is_empty() { None } else { Some(request.note) },
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -248,19 +236,14 @@ impl HyperboxControl for GrpcControlService {
         &self,
         request: Request<pb::RestoreSnapshotRequest>,
     ) -> Result<Response<pb::RestoreSnapshotResponse>, Status> {
-        let snapshot_id = hyperbox_core::SnapshotId(
+        let snapshot_id = SnapshotId(
             uuid::Uuid::parse_str(&request.into_inner().snapshot_id)
                 .map_err(|e| Status::invalid_argument(format!("invalid snapshot_id: {e}")))?,
         );
 
-        let snapshot = self
-            .snapshots
-            .get_snapshot(&snapshot_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::not_found("snapshot not found"))?;
-
-        let info = restore_from_snapshot(&self.runtime, snapshot)
+        let info = self
+            .runtime
+            .restore_snapshot(&snapshot_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -270,23 +253,10 @@ impl HyperboxControl for GrpcControlService {
     }
 }
 
-async fn restore_from_snapshot(
-    runtime: &HyperboxServer,
-    snapshot: SnapshotMetadata,
-) -> Result<hyperbox_core::SandboxInfo, hyperbox_core::HyperboxError> {
-    runtime
-        .create_sandbox(SandboxConfig {
-            template: snapshot.template,
-            ..SandboxConfig::default()
-        })
-        .await
-}
-
 pub async fn serve_grpc(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     let backend = crate::select_backend(crate::BackendKind::from_env());
     let runtime = crate::HyperboxServer::new(backend);
-    let snapshots = crate::InMemorySnapshotStore::default();
-    let service = GrpcControlService::new(runtime, snapshots);
+    let service = GrpcControlService::new(runtime);
 
     tonic::transport::Server::builder()
         .add_service(pb::hyperbox_control_server::HyperboxControlServer::new(service))
