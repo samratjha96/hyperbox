@@ -1,3 +1,4 @@
+pub mod dns_proxy;
 pub mod firewall;
 
 use regex::Regex;
@@ -9,6 +10,7 @@ pub use firewall::{
     CommandExecutor, CommandSpec, FirewallManager, RecordingExecutor, ShellExecutor, VmNetworkSpec,
     build_apply_plan, build_teardown_plan,
 };
+pub use dns_proxy::{DnsAllowlistProxy, ResolvedIp};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

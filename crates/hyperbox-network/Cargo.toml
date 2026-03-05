@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+hickory-proto = "0.24"
 regex.workspace = true
 serde.workspace = true
 tokio.workspace = true
