@@ -38,6 +38,18 @@ enum Command {
     },
     Templates,
     Probe,
+    Bench {
+        #[arg(long, default_value = "python:3.12")]
+        template: String,
+        #[arg(long)]
+        cmd: String,
+        #[arg(long, default_value_t = 20)]
+        runs: usize,
+        #[arg(long, default_value_t = 3)]
+        warmup: usize,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -115,6 +127,38 @@ async fn main() -> anyhow::Result<()> {
                         "supported": false,
                         "message": "unsupported host for vm backend"
                     })
+                );
+            }
+        }
+        Command::Bench {
+            template,
+            cmd,
+            runs,
+            warmup,
+            json,
+        } => {
+            let config = SandboxConfig {
+                template,
+                ..SandboxConfig::default()
+            };
+            let summary = if let Some(server_url) = cli.server_url {
+                bench_remote(server_url, config, cmd, warmup, runs).await?
+            } else {
+                bench_local(config, cmd, warmup, runs).await?
+            };
+
+            if json {
+                println!("{}", serde_json::to_string(&summary)?);
+            } else {
+                println!(
+                    "runs={} warmup={} mean_ms={:.2} p50_ms={} p95_ms={} min_ms={} max_ms={}",
+                    summary.runs,
+                    summary.warmup,
+                    summary.mean_ms,
+                    summary.p50_ms,
+                    summary.p95_ms,
+                    summary.min_ms,
+                    summary.max_ms
                 );
             }
         }
@@ -253,4 +297,104 @@ struct RunResponse {
     stdout: String,
     stderr: String,
     artifacts: Vec<(String, String)>,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchSummary {
+    runs: usize,
+    warmup: usize,
+    mean_ms: f64,
+    p50_ms: u128,
+    p95_ms: u128,
+    min_ms: u128,
+    max_ms: u128,
+}
+
+async fn bench_local(
+    config: SandboxConfig,
+    cmd: String,
+    warmup: usize,
+    runs: usize,
+) -> anyhow::Result<BenchSummary> {
+    let backend = Arc::new(LocalBackend::new(None));
+    let server = HyperboxServer::new(backend);
+    let mut samples = Vec::with_capacity(runs);
+
+    for i in 0..(warmup + runs) {
+        let sandbox = server.create_sandbox(config.clone()).await?;
+        let outcome = server
+            .exec(
+                &sandbox.id,
+                ExecRequest {
+                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.clone()],
+                    timeout_secs: 60,
+                },
+            )
+            .await?;
+        server.destroy_sandbox(&sandbox.id).await?;
+        if i >= warmup {
+            samples.push(outcome.duration_ms);
+        }
+    }
+
+    Ok(summarize_samples(samples, warmup))
+}
+
+async fn bench_remote(
+    server_url: String,
+    config: SandboxConfig,
+    cmd: String,
+    warmup: usize,
+    runs: usize,
+) -> anyhow::Result<BenchSummary> {
+    let mut client = GrpcControlClient::connect(server_url).await?;
+    let mut samples = Vec::with_capacity(runs);
+
+    for i in 0..(warmup + runs) {
+        let sandbox = client.create_sandbox(config.clone()).await?;
+        let outcome = client
+            .exec(
+                &sandbox.id,
+                ExecRequest {
+                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.clone()],
+                    timeout_secs: 60,
+                },
+            )
+            .await?;
+        client.destroy_sandbox(&sandbox.id).await?;
+        if i >= warmup {
+            samples.push(outcome.duration_ms);
+        }
+    }
+
+    Ok(summarize_samples(samples, warmup))
+}
+
+fn summarize_samples(mut samples: Vec<u128>, warmup: usize) -> BenchSummary {
+    samples.sort_unstable();
+    let runs = samples.len();
+    let sum: u128 = samples.iter().copied().sum();
+    let mean_ms = if runs == 0 {
+        0.0
+    } else {
+        (sum as f64) / (runs as f64)
+    };
+
+    BenchSummary {
+        runs,
+        warmup,
+        mean_ms,
+        p50_ms: percentile(&samples, 50),
+        p95_ms: percentile(&samples, 95),
+        min_ms: samples.first().copied().unwrap_or_default(),
+        max_ms: samples.last().copied().unwrap_or_default(),
+    }
+}
+
+fn percentile(values: &[u128], p: usize) -> u128 {
+    if values.is_empty() {
+        return 0;
+    }
+    let rank = ((values.len() * p).div_ceil(100)).saturating_sub(1);
+    values[rank]
 }
