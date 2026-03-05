@@ -1,5 +1,9 @@
+pub mod daemon;
+
 use hyperbox_core::{ExecOutcome, ExecRequest};
 use serde::{Deserialize, Serialize};
+
+pub use daemon::{AgentService, serve_agent};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]

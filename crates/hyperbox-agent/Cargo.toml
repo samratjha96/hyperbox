@@ -6,7 +6,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "hyperbox-agentd"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+hyperbox-core = { path = "../hyperbox-core" }
+hyperbox-proto = { path = "../hyperbox-proto" }
 serde.workspace = true
 serde_json.workspace = true
-hyperbox-core = { path = "../hyperbox-core" }
+tokio.workspace = true
+tonic = { version = "0.12", features = ["transport"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
