@@ -1,3 +1,4 @@
+pub mod client;
 pub mod grpc;
 pub mod local_backend;
 pub mod metrics;
@@ -11,3 +12,4 @@ pub use metrics::{MetricsCollector, MetricsSnapshot};
 pub use pool::{PoolStats, WarmPoolManager};
 pub use runtime::HyperboxServer;
 pub use snapshot_store::InMemorySnapshotStore;
+pub use client::GrpcControlClient;
