@@ -1,4 +1,4 @@
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{io::IsTerminal, process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -633,15 +633,20 @@ async fn open_shell_with_client(
 
     let container_bin = extract_container_bin_from_helper_argv(&server_info.apple_helper_argv)
         .unwrap_or_else(|| "container".to_string());
+    let mut args = vec![
+        "exec".to_string(),
+        "--interactive".to_string(),
+        "--workdir".to_string(),
+        "/workspace".to_string(),
+    ];
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        args.push("--tty".to_string());
+    }
+    args.push(format!("hyperbox-{}", sandbox_id.0));
+    args.push(shell.to_string());
+
     let status = std::process::Command::new(&container_bin)
-        .args([
-            "exec",
-            "--interactive",
-            "--workdir",
-            "/workspace",
-            &format!("hyperbox-{}", sandbox_id.0),
-            shell,
-        ])
+        .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
