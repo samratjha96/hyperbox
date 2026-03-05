@@ -15,7 +15,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 camino.workspace = true
 chrono.workspace = true
+hyperbox-apple = { path = "../hyperbox-apple" }
 hyperbox-core = { path = "../hyperbox-core" }
+hyperbox-firecracker = { path = "../hyperbox-firecracker" }
 hyperbox-proto = { path = "../hyperbox-proto" }
 serde.workspace = true
 serde_json.workspace = true

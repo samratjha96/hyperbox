@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tonic::{Request, Response, Status};
 
 use hyperbox_core::{
@@ -285,7 +283,7 @@ async fn restore_from_snapshot(
 }
 
 pub async fn serve_grpc(addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let backend = Arc::new(crate::LocalBackend::new(None));
+    let backend = crate::select_backend(crate::BackendKind::from_env());
     let runtime = crate::HyperboxServer::new(backend);
     let snapshots = crate::InMemorySnapshotStore::default();
     let service = GrpcControlService::new(runtime, snapshots);
