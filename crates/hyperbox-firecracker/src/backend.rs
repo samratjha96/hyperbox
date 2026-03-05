@@ -7,7 +7,8 @@ use std::{
 };
 
 use chrono::Utc;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinHandle, time::Duration};
+use tracing::warn;
 
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
@@ -52,6 +53,7 @@ struct FirecrackerSandbox {
     info: SandboxInfo,
     vm: RunningVm,
     network_spec: Option<VmNetworkSpec>,
+    allowlist_sync_task: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -89,35 +91,56 @@ impl FirecrackerBackend {
     }
 
     async fn resolve_allowlist_ips(&self, domains: &[String]) -> Result<Vec<IpAddr>> {
-        let mut resolved = BTreeSet::new();
-        for domain in domains {
-            if domain.contains('*') {
-                return Err(HyperboxError::InvalidConfig(
-                    "wildcard allowlist entries are not supported in firecracker backend yet"
-                        .to_string(),
-                ));
-            }
+        resolve_allowlist_ips(domains).await
+    }
+}
 
-            let entries = tokio::net::lookup_host((domain.as_str(), 443))
-                .await
-                .map_err(|e| {
-                    HyperboxError::ExecutionFailed(format!(
-                        "resolve allowlist domain `{domain}`: {e}"
-                    ))
-                })?;
-            for entry in entries {
-                resolved.insert(entry.ip());
-            }
-        }
-
-        if resolved.is_empty() {
-            return Err(HyperboxError::ExecutionFailed(
-                "allowlist resolution returned zero IP addresses".to_string(),
+async fn resolve_allowlist_ips(domains: &[String]) -> Result<Vec<IpAddr>> {
+    let mut resolved = BTreeSet::new();
+    for domain in domains {
+        if domain.contains('*') {
+            return Err(HyperboxError::InvalidConfig(
+                "wildcard allowlist entries are not supported in firecracker backend yet"
+                    .to_string(),
             ));
         }
 
-        Ok(resolved.into_iter().collect())
+        let entries = tokio::net::lookup_host((domain.as_str(), 443))
+            .await
+            .map_err(|e| {
+                HyperboxError::ExecutionFailed(format!("resolve allowlist domain `{domain}`: {e}"))
+            })?;
+        for entry in entries {
+            resolved.insert(entry.ip());
+        }
     }
+
+    if resolved.is_empty() {
+        return Err(HyperboxError::ExecutionFailed(
+            "allowlist resolution returned zero IP addresses".to_string(),
+        ));
+    }
+
+    Ok(resolved.into_iter().collect())
+}
+
+async fn populate_allowlist_set(vm_id: &str, ips: &[IpAddr]) -> Result<()> {
+    let commands = build_allowlist_population_plan(vm_id, ips);
+    let executor = ShellExecutor;
+    for command in commands {
+        executor.run(command).await.map_err(|e| {
+            HyperboxError::ExecutionFailed(format!("populate allowlist ipset: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn allowlist_refresh_interval_secs() -> u64 {
+    std::env::var("HYPERBOX_ALLOWLIST_REFRESH_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(60)
 }
 
 #[async_trait::async_trait]
@@ -165,6 +188,7 @@ impl SandboxBackend for FirecrackerBackend {
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("start firecracker vm: {e}")))?;
 
+        let mut allowlist_sync_task = None;
         let network_spec = if matches!(config.network, hyperbox_core::NetworkMode::None) {
             None
         } else {
@@ -197,13 +221,35 @@ impl SandboxBackend for FirecrackerBackend {
 
             if let NetworkMode::Allowlist(domains) = &config.network {
                 let ips = self.resolve_allowlist_ips(domains).await?;
-                let populate = build_allowlist_population_plan(&spec.vm_id, &ips);
-                let executor = ShellExecutor;
-                for command in populate {
-                    executor.run(command).await.map_err(|e| {
-                        HyperboxError::ExecutionFailed(format!("populate allowlist ipset: {e}"))
-                    })?;
-                }
+                populate_allowlist_set(&spec.vm_id, &ips).await?;
+
+                let vm_id = spec.vm_id.clone();
+                let domains = domains.clone();
+                let refresh_every = allowlist_refresh_interval_secs();
+                allowlist_sync_task = Some(tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(Duration::from_secs(refresh_every));
+                    loop {
+                        ticker.tick().await;
+                        match resolve_allowlist_ips(&domains).await {
+                            Ok(ips) => {
+                                if let Err(err) = populate_allowlist_set(&vm_id, &ips).await {
+                                    warn!(
+                                        vm_id = %vm_id,
+                                        error = %err,
+                                        "allowlist refresh apply failed"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                warn!(
+                                    vm_id = %vm_id,
+                                    error = %err,
+                                    "allowlist refresh resolve failed"
+                                );
+                            }
+                        }
+                    }
+                }));
             }
             Some(spec)
         };
@@ -222,6 +268,7 @@ impl SandboxBackend for FirecrackerBackend {
                 info: info.clone(),
                 vm,
                 network_spec,
+                allowlist_sync_task,
             },
         );
 
@@ -318,6 +365,10 @@ impl SandboxBackend for FirecrackerBackend {
         let mut sandbox = sandboxes
             .remove(sandbox_id)
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+
+        if let Some(task) = sandbox.allowlist_sync_task.take() {
+            task.abort();
+        }
 
         if let Some(spec) = &sandbox.network_spec {
             if self.config.network_dry_run {
