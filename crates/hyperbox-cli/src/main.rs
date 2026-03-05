@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig};
 use hyperbox_server::{HyperboxServer, LocalBackend};
 
@@ -28,6 +29,8 @@ enum Command {
         writes: Vec<String>,
         #[arg(long = "read")]
         reads: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     Templates,
     Probe,
@@ -65,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             writes,
             reads,
+            json,
         } => {
             let config = SandboxConfig {
                 template,
@@ -100,16 +104,32 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
 
-            print!("{}", outcome.stdout);
-            eprint!("{}", outcome.stderr);
+            let mut read_artifacts = Vec::new();
 
             for path in reads {
                 let payload = server.read_file(&sandbox.id, &path).await?;
                 let data = String::from_utf8_lossy(&payload.bytes);
-                println!("--- {path} ---");
-                print!("{data}");
-                if !data.ends_with('\n') {
-                    println!();
+                read_artifacts.push((path, data.to_string()));
+            }
+
+            if json {
+                let response = RunResponse {
+                    exit_code: outcome.exit_code,
+                    duration_ms: outcome.duration_ms,
+                    stdout: outcome.stdout.clone(),
+                    stderr: outcome.stderr.clone(),
+                    artifacts: read_artifacts.clone(),
+                };
+                println!("{}", serde_json::to_string(&response)?);
+            } else {
+                print!("{}", outcome.stdout);
+                eprint!("{}", outcome.stderr);
+                for (path, data) in &read_artifacts {
+                    println!("--- {path} ---");
+                    print!("{data}");
+                    if !data.ends_with('\n') {
+                        println!();
+                    }
                 }
             }
 
@@ -146,4 +166,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct RunResponse {
+    exit_code: i32,
+    duration_ms: u128,
+    stdout: String,
+    stderr: String,
+    artifacts: Vec<(String, String)>,
 }
