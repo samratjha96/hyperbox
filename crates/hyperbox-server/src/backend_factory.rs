@@ -54,7 +54,11 @@ fn auto_backend() -> Arc<dyn SandboxBackend> {
         }
         "macos" => {
             let caps = detect_macos_capabilities();
-            if caps.supports_virtualization_framework {
+            let helper_configured = std::env::var("HYPERBOX_APPLE_HELPER")
+                .ok()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            if caps.supports_virtualization_framework && helper_configured {
                 Arc::new(build_apple_backend())
             } else {
                 Arc::new(LocalBackend::new(None))

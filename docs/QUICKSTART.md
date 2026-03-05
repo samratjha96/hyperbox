@@ -71,3 +71,4 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 - On macOS, backend runtime selection can be forced with `HYPERBOX_APPLE_RUNTIME=containerization|virtualization`; auto mode prefers containerization only when available on host.
 - Apple backend supports a helper bridge command (`HYPERBOX_APPLE_HELPER`) for native runtime integration; protocol is documented in `docs/APPLE_HELPER_PROTOCOL.md`.
 - Built-in helper command: `export HYPERBOX_APPLE_HELPER=\"hyperbox apple-helper\"` (uses Apple `container` CLI and bind-mounts `--workspace` to `/workspace`).
+- Apple backend is helper-only now: if `HYPERBOX_BACKEND=apple` and helper is not configured, sandbox creation fails fast. In auto mode on macOS, backend selection uses Apple runtime only when helper is configured.

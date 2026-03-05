@@ -204,6 +204,11 @@ impl SandboxBackend for AppleVzBackend {
                     .to_string(),
             ));
         }
+        if self.config.launch_command.is_none() {
+            return Err(HyperboxError::InvalidConfig(
+                "apple backend requires HYPERBOX_APPLE_HELPER to be configured".to_string(),
+            ));
+        }
         if matches!(self.config.runtime_kind, AppleRuntimeKind::Containerization)
             && !detect_macos_capabilities().supports_containerization_framework
         {
@@ -446,5 +451,30 @@ impl SandboxBackend for AppleVzBackend {
                 sandbox.info.clone()
             })
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppleBackendConfig, AppleRuntimeKind, AppleVzBackend};
+    use hyperbox_core::{HyperboxError, SandboxBackend, SandboxConfig};
+
+    #[tokio::test]
+    async fn create_requires_helper_command() {
+        let backend = AppleVzBackend::new(AppleBackendConfig {
+            launch_command: None,
+            runtime_kind: AppleRuntimeKind::Virtualization,
+            ..AppleBackendConfig::default()
+        });
+
+        let err = backend
+            .create(SandboxConfig::default())
+            .await
+            .expect_err("create should fail when helper command is missing");
+        assert!(matches!(err, HyperboxError::InvalidConfig(_)));
+        assert!(
+            err.to_string().contains("HYPERBOX_APPLE_HELPER"),
+            "unexpected error: {err}"
+        );
     }
 }
