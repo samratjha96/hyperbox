@@ -7,7 +7,6 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-camino.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hyperbox-core = { path = "../hyperbox-core" }

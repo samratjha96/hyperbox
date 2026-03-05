@@ -1,4 +1,3 @@
-use camino::Utf8PathBuf;
 use hyperbox_core::{ExecOutcome, ExecRequest};
 use serde::{Deserialize, Serialize};
 
@@ -7,8 +6,8 @@ use serde::{Deserialize, Serialize};
 pub enum AgentRequest {
     Ping,
     Exec { request: ExecRequest },
-    ReadFile { path: Utf8PathBuf },
-    WriteFile { path: Utf8PathBuf, bytes: Vec<u8> },
+    ReadFile { path: String },
+    WriteFile { path: String, bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

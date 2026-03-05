@@ -27,7 +27,7 @@ pub fn detect_linux_capabilities() -> LinuxCapabilities {
 
     let kvm_modules_loaded = Command::new("sh")
         .arg("-lc")
-        .arg("lsmod | grep -E '^kvm(_intel|_amd)?\\b' >/dev/null")
+        .arg("command -v lsmod >/dev/null 2>&1 && lsmod | grep -E '^kvm(_intel|_amd)?\\b' >/dev/null")
         .status()
         .is_ok_and(|status| status.success());
 

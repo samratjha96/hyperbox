@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use camino::Utf8PathBuf;
 
 use crate::{
+    Result,
     config::SandboxConfig,
     model::{ExecOutcome, ExecRequest, SandboxId, SandboxInfo},
-    Result,
 };
 
 #[derive(Debug, Clone)]

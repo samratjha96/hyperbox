@@ -93,7 +93,8 @@ impl SandboxBackend for LocalBackend {
         command.env("HYPERBOX_TEMPLATE", &record.config.template);
         command.env(
             "HYPERBOX_NETWORK_MODE",
-            serde_json::to_string(&record.config.network).unwrap_or_else(|_| "\"none\"".to_string()),
+            serde_json::to_string(&record.config.network)
+                .unwrap_or_else(|_| "\"none\"".to_string()),
         );
 
         for (key, value) in &record.config.env {
@@ -199,7 +200,11 @@ mod tests {
             .exec(
                 &lease.id,
                 ExecRequest {
-                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), "echo hello".to_string()],
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        "echo hello".to_string(),
+                    ],
                     timeout_secs: 2,
                 },
             )

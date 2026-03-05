@@ -65,7 +65,7 @@ fn percentile(values: &[u128], p: usize) -> u128 {
         return 0;
     }
 
-    let rank = ((values.len() - 1) * p) / 100;
+    let rank = ((values.len() * p).div_ceil(100)).saturating_sub(1);
     values[rank]
 }
 

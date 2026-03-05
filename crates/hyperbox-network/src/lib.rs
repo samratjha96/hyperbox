@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn network_modes_behave() {
-        let mode = NetworkMode::Allowlist(vec!["api.openai.com".to_string(), "*.github.com".to_string()]);
+        let mode = NetworkMode::Allowlist(vec![
+            "api.openai.com".to_string(),
+            "*.github.com".to_string(),
+        ]);
         let eval = NetworkPolicyEvaluator::new(&mode);
         assert!(eval.allows_domain(&mode, "api.openai.com"));
         assert!(eval.allows_domain(&mode, "gist.github.com"));

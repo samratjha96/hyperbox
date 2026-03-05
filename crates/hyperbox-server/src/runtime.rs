@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
-    TemplateRegistry,
+    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId,
+    SandboxInfo, TemplateRegistry,
 };
 
 use crate::metrics::{MetricsCollector, MetricsSnapshot};
@@ -102,7 +102,11 @@ mod tests {
             .exec(
                 &info.id,
                 ExecRequest {
-                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), "echo ok".to_string()],
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        "echo ok".to_string(),
+                    ],
                     timeout_secs: 2,
                 },
             )

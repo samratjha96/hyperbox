@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Serialize;
 use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig};
 use hyperbox_server::{HyperboxServer, LocalBackend};
+use serde::Serialize;
 
 #[derive(Debug, Parser)]
-#[command(name = "hyperbox", version, about = "Secure sandbox runtime for agent code execution")]
+#[command(
+    name = "hyperbox",
+    version,
+    about = "Secure sandbox runtime for agent code execution"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -80,9 +84,9 @@ async fn main() -> anyhow::Result<()> {
             let sandbox = server.create_sandbox(config).await?;
 
             for entry in writes {
-                let (path, content) = entry
-                    .split_once('=')
-                    .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
+                let (path, content) = entry.split_once('=').ok_or_else(|| {
+                    anyhow::anyhow!("invalid --write value, expected PATH=CONTENT")
+                })?;
                 server
                     .write_file(
                         &sandbox.id,

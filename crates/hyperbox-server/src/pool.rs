@@ -1,4 +1,7 @@
-use std::{collections::{HashSet, VecDeque}, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 use tokio::sync::Mutex;
 
@@ -84,7 +87,9 @@ mod tests {
 
     #[tokio::test]
     async fn pool_warms_and_reuses() {
-        let backend = Arc::new(LocalBackend::new(Some(std::env::temp_dir().join("hyperbox-pool-test"))));
+        let backend = Arc::new(LocalBackend::new(Some(
+            std::env::temp_dir().join("hyperbox-pool-test"),
+        )));
         let pool = WarmPoolManager::new(backend, SandboxConfig::default(), 2);
 
         pool.fill().await.expect("fill pool");
