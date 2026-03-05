@@ -46,14 +46,22 @@ cargo run -p hyperbox-cli -- run --sandbox-id "$SANDBOX_ID" --cmd "pytest -q"
 cargo run -p hyperbox-cli -- destroy --sandbox-id "$SANDBOX_ID"
 ```
 
-## Attach an interactive shell to a running sandbox
+## Open an interactive shell
 
 ```bash
+# Ephemeral shell sandbox (auto-create + auto-destroy, workspace defaults to $PWD).
+cargo run -p hyperbox-cli -- shell
+
+# Optional: customize template/network/workspace for ephemeral shell.
+cargo run -p hyperbox-cli -- shell --template python:3.12 --workspace "$PWD"
+
+# Attach to an existing sandbox.
 SANDBOX_ID=$(cargo run -p hyperbox-cli -- create --workspace "$PWD")
 cargo run -p hyperbox-cli -- shell --sandbox-id "$SANDBOX_ID"
 ```
 
 Notes:
+- `shell` without `--sandbox-id` creates a temporary sandbox and destroys it after the shell exits.
 - `shell` is supported for Apple backend sandboxes (built-in helper path) and Firecracker backend sandboxes (agent stream path).
 
 ## Run in proxy mode for agent adapters

@@ -92,9 +92,17 @@ enum Command {
     },
     Shell {
         #[arg(long)]
-        sandbox_id: String,
+        sandbox_id: Option<String>,
         #[arg(long, default_value = "/bin/sh")]
         shell: String,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        template: Option<String>,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        workspace: Option<String>,
+        #[arg(long, value_enum, conflicts_with = "sandbox_id")]
+        network: Option<NetworkArg>,
+        #[arg(long = "allow", conflicts_with = "sandbox_id")]
+        allow: Vec<String>,
     },
     Templates {
         #[arg(long)]
@@ -255,8 +263,26 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", info.id.0);
             }
         }
-        Command::Shell { sandbox_id, shell } => {
-            open_shell(cli.server_url, &sandbox_id, &shell).await?;
+        Command::Shell {
+            sandbox_id,
+            shell,
+            template,
+            workspace,
+            network,
+            allow,
+        } => {
+            let exit_code = shell_command(
+                cli.server_url,
+                sandbox_id,
+                &shell,
+                template.unwrap_or_else(|| "python:3.12".to_string()),
+                workspace,
+                network.unwrap_or(NetworkArg::None).to_mode(allow),
+            )
+            .await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Command::Templates { disk_root } => {
             if let Some(root) = disk_root {
@@ -504,14 +530,74 @@ async fn run_existing_remote(
     Ok(())
 }
 
+async fn shell_command(
+    server_url: Option<String>,
+    sandbox_id: Option<String>,
+    shell: &str,
+    template: String,
+    workspace: Option<String>,
+    network: NetworkMode,
+) -> anyhow::Result<i32> {
+    if let Some(sandbox_id) = sandbox_id {
+        return open_shell(server_url, &sandbox_id, shell).await;
+    }
+
+    let workspace_dir = match workspace {
+        Some(workspace) => Some(workspace),
+        None => Some(
+            std::env::current_dir()
+                .context("resolve current directory for shell workspace")?
+                .to_string_lossy()
+                .to_string(),
+        ),
+    };
+
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
+    let sandbox = client
+        .create_sandbox(SandboxConfig {
+            template,
+            network,
+            workspace_dir,
+            ..SandboxConfig::default()
+        })
+        .await?;
+
+    let shell_result = open_shell_with_client(&mut client, &sandbox.id, shell).await;
+    let destroy_result = client.destroy_sandbox(&sandbox.id).await;
+
+    match (shell_result, destroy_result) {
+        (Ok(code), Ok(())) => Ok(code),
+        (Ok(_), Err(err)) => Err(err).with_context(|| {
+            format!(
+                "failed to destroy ephemeral sandbox {} after shell exit",
+                sandbox.id.0
+            )
+        }),
+        (Err(shell_err), Ok(())) => Err(shell_err),
+        (Err(shell_err), Err(destroy_err)) => Err(anyhow::anyhow!(
+            "shell failed: {shell_err}; additionally failed to destroy ephemeral sandbox {}: {destroy_err}",
+            sandbox.id.0
+        )),
+    }
+}
+
 async fn open_shell(
     server_url: Option<String>,
     sandbox_id: &str,
     shell: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     let autostart_default = server_url.is_none();
     let mut client = connect_client(server_url, autostart_default).await?;
     let sandbox_id = parse_sandbox_id(sandbox_id)?;
+    open_shell_with_client(&mut client, &sandbox_id, shell).await
+}
+
+async fn open_shell_with_client(
+    client: &mut GrpcControlClient,
+    sandbox_id: &SandboxId,
+    shell: &str,
+) -> anyhow::Result<i32> {
     let _ = client.inspect_sandbox(&sandbox_id).await?;
     let server_info = match client.get_server_info().await {
         Ok(info) => info,
@@ -529,7 +615,7 @@ async fn open_shell(
         return open_shell_via_agent_stream(&sandbox_id, shell).await;
     }
     if server_info.backend_selected == "local" {
-        return open_shell_local(&mut client, &sandbox_id, shell).await;
+        return open_shell_local(client, &sandbox_id, shell).await;
     }
     if server_info.backend_selected != "apple" {
         bail!(
@@ -567,19 +653,14 @@ async fn open_shell(
             )
         })?;
 
-    if let Some(code) = status.code()
-        && code != 0
-    {
-        std::process::exit(code);
-    }
-    Ok(())
+    Ok(status.code().unwrap_or(1))
 }
 
 async fn open_shell_local(
     client: &mut GrpcControlClient,
     sandbox_id: &SandboxId,
     shell: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     let probe = client
         .exec(
             sandbox_id,
@@ -608,15 +689,10 @@ async fn open_shell_local(
         .stderr(Stdio::inherit())
         .status()
         .with_context(|| format!("launch local interactive shell in `{workdir}`"))?;
-    if let Some(code) = status.code()
-        && code != 0
-    {
-        std::process::exit(code);
-    }
-    Ok(())
+    Ok(status.code().unwrap_or(1))
 }
 
-async fn open_shell_via_agent_stream(sandbox_id: &SandboxId, shell: &str) -> anyhow::Result<()> {
+async fn open_shell_via_agent_stream(sandbox_id: &SandboxId, shell: &str) -> anyhow::Result<i32> {
     let endpoint = std::env::var("HYPERBOX_AGENT_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:60061".to_string());
     let mut agent = HyperboxAgentClient::connect(endpoint.clone())
@@ -684,17 +760,14 @@ async fn open_shell_via_agent_stream(sandbox_id: &SandboxId, shell: &str) -> any
             }
             Some(shell_event::Payload::ExitCode(code)) => {
                 stdin_task.abort();
-                if code != 0 {
-                    std::process::exit(code);
-                }
-                return Ok(());
+                return Ok(code);
             }
             None => {}
         }
     }
 
     stdin_task.abort();
-    Ok(())
+    bail!("shell stream ended before receiving exit code")
 }
 
 fn helper_argv_is_builtin_apple_helper(argv: &[String]) -> bool {
