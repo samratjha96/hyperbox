@@ -2,7 +2,7 @@ use std::{process::Stdio, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId};
@@ -88,6 +88,18 @@ enum Command {
         addr: String,
     },
     Probe,
+    Proxy {
+        #[arg(long, default_value = "python:3.12")]
+        template: String,
+        #[arg(long, value_enum, default_value_t = NetworkArg::None)]
+        network: NetworkArg,
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        #[arg(long)]
+        workspace: Option<String>,
+    },
     Bench {
         #[arg(long, default_value = "python:3.12")]
         template: String,
@@ -267,6 +279,25 @@ async fn main() -> anyhow::Result<()> {
                     })
                 );
             }
+        }
+        Command::Proxy {
+            template,
+            network,
+            allow,
+            timeout,
+            workspace,
+        } => {
+            run_proxy_loop(
+                cli.server_url,
+                SandboxConfig {
+                    template,
+                    network: network.to_mode(allow),
+                    timeout_secs: timeout,
+                    workspace_dir: workspace,
+                    ..SandboxConfig::default()
+                },
+            )
+            .await?;
         }
         Command::Bench {
             template,
@@ -482,6 +513,125 @@ async fn run_existing_remote(
     }
 
     emit_result(outcome, artifacts, json)?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum ProxyRequest {
+    Exec { cmd: String, timeout: Option<u64> },
+    Read { path: String },
+    Write { path: String, content: String },
+    Destroy,
+    Ping,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum ProxyResponse {
+    Exec {
+        exit_code: i32,
+        duration_ms: u128,
+        stdout: String,
+        stderr: String,
+    },
+    Read {
+        path: String,
+        content: String,
+    },
+    Write,
+    Destroy,
+    Pong,
+    Error {
+        message: String,
+    },
+}
+
+async fn run_proxy_loop(server_url: Option<String>, config: SandboxConfig) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut client = connect_client(server_url, true).await?;
+    let sandbox = client.create_sandbox(config).await?;
+    let sandbox_id = sandbox.id;
+
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    let mut stdout = tokio::io::stdout();
+
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = match serde_json::from_str::<ProxyRequest>(&line) {
+            Ok(ProxyRequest::Exec { cmd, timeout }) => match client
+                .exec(
+                    &sandbox_id,
+                    ExecRequest {
+                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
+                        timeout_secs: timeout.unwrap_or(60),
+                    },
+                )
+                .await
+            {
+                Ok(outcome) => ProxyResponse::Exec {
+                    exit_code: outcome.exit_code,
+                    duration_ms: outcome.duration_ms,
+                    stdout: outcome.stdout,
+                    stderr: outcome.stderr,
+                },
+                Err(err) => ProxyResponse::Error {
+                    message: err.to_string(),
+                },
+            },
+            Ok(ProxyRequest::Read { path }) => {
+                match client.read_file(&sandbox_id, path.clone()).await {
+                    Ok(bytes) => ProxyResponse::Read {
+                        path,
+                        content: String::from_utf8_lossy(&bytes).to_string(),
+                    },
+                    Err(err) => ProxyResponse::Error {
+                        message: err.to_string(),
+                    },
+                }
+            }
+            Ok(ProxyRequest::Write { path, content }) => {
+                match client
+                    .write_file(&sandbox_id, path, content.as_bytes().to_vec())
+                    .await
+                {
+                    Ok(()) => ProxyResponse::Write,
+                    Err(err) => ProxyResponse::Error {
+                        message: err.to_string(),
+                    },
+                }
+            }
+            Ok(ProxyRequest::Destroy) => {
+                let response = match client.destroy_sandbox(&sandbox_id).await {
+                    Ok(()) => ProxyResponse::Destroy,
+                    Err(err) => ProxyResponse::Error {
+                        message: err.to_string(),
+                    },
+                };
+                let encoded = serde_json::to_string(&response)?;
+                stdout.write_all(encoded.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+                return Ok(());
+            }
+            Ok(ProxyRequest::Ping) => ProxyResponse::Pong,
+            Err(err) => ProxyResponse::Error {
+                message: format!("invalid request: {err}"),
+            },
+        };
+
+        let encoded = serde_json::to_string(&response)?;
+        stdout.write_all(encoded.as_bytes()).await?;
+        stdout.write_all(b"\n").await?;
+        stdout.flush().await?;
+    }
+
+    let _ = client.destroy_sandbox(&sandbox_id).await;
     Ok(())
 }
 

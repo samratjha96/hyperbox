@@ -32,6 +32,13 @@ cargo run -p hyperbox-cli -- run --sandbox-id "$SANDBOX_ID" --cmd "pytest -q"
 cargo run -p hyperbox-cli -- destroy --sandbox-id "$SANDBOX_ID"
 ```
 
+## Run in proxy mode for agent adapters
+
+```bash
+# Starts a persistent sandbox and serves JSON-lines protocol on stdio.
+cargo run -p hyperbox-cli -- proxy --workspace "$PWD"
+```
+
 ## Write and read artifacts
 
 ```bash

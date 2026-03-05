@@ -37,6 +37,7 @@ cargo run -p hyperbox-cli -- run --template python:3.12 --workspace "$PWD" --cmd
 cargo run -p hyperbox-cli -- create --workspace "$PWD" --json
 cargo run -p hyperbox-cli -- run --sandbox-id <sandbox-id> --cmd "ls -la"
 cargo run -p hyperbox-cli -- destroy --sandbox-id <sandbox-id>
+cargo run -p hyperbox-cli -- proxy --workspace "$PWD"
 cargo run -p hyperbox-server
 cargo run -p hyperbox-agent --bin hyperbox-agentd
 cargo run -p hyperbox-cli -- --server-url http://127.0.0.1:50051 bench --template python:3.12 --cmd "python3 -c 'print(1)'" --json
