@@ -21,8 +21,16 @@ cargo run -p hyperbox-cli -- run --template python:3.12 --workspace "$PWD" --cmd
 Default behavior:
 - `hyperbox run/create/proxy` now go through the control-plane server path by default (not direct local backend calls).
 - Backend selection is `auto` by default.
-- On macOS, Apple backend is auto-selected only when the selected helper can run on this host (today: built-in helper requires Containerization framework support); otherwise auto falls back to local backend.
+- On macOS, `auto` mode requires VM-capable backend. If Apple runtime prerequisites are missing, commands fail fast (no silent fallback).
 - Overrides remain available for power users through `HYPERBOX_BACKEND`, `HYPERBOX_APPLE_RUNTIME`, and `HYPERBOX_APPLE_HELPER`.
+
+## One-time runtime setup (macOS)
+
+```bash
+cargo run -p hyperbox-cli -- setup
+```
+
+This installs Apple container runtime prerequisites (when missing) and starts `container system`.
 
 ## Keep a persistent sandbox for an agent workflow
 
@@ -46,8 +54,7 @@ cargo run -p hyperbox-cli -- shell --sandbox-id "$SANDBOX_ID"
 ```
 
 Notes:
-- `shell` is supported for Apple backend sandboxes (built-in helper path), Firecracker backend sandboxes (agent stream path), and local backend sandboxes.
-- If Apple backend is requested but not runnable on the host (for example missing helper/runtime support), server falls back to local backend automatically.
+- `shell` is supported for Apple backend sandboxes (built-in helper path) and Firecracker backend sandboxes (agent stream path).
 
 ## Run in proxy mode for agent adapters
 
@@ -81,7 +88,6 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 
 ## Caveats
 
-- Firecracker VM runtime is not yet integrated; this repository currently uses a local backend for execution.
 - Network allowlist is currently policy-evaluated in libraries; host firewall enforcement is planned for Linux/macOS backend integration.
 - Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
 - `network=allowlist` and `network=full` are rejected by LocalBackend and Apple backend unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`). This prevents false-positive security behavior.

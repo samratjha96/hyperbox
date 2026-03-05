@@ -3,7 +3,10 @@ use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
 use hyperbox_apple::{
     AppleBackendConfig, AppleRuntimeKind, AppleVzBackend, detect_macos_capabilities,
 };
-use hyperbox_core::SandboxBackend;
+use hyperbox_core::{
+    FilePayload, HyperboxError, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
+    SandboxLease,
+};
 use hyperbox_firecracker::{
     FirecrackerBackend, FirecrackerBackendConfig, detect_linux_capabilities,
 };
@@ -16,6 +19,7 @@ pub enum BackendKind {
     Local,
     Firecracker,
     Apple,
+    Unavailable,
 }
 
 impl BackendKind {
@@ -37,7 +41,56 @@ impl BackendKind {
             Self::Local => "local",
             Self::Firecracker => "firecracker",
             Self::Apple => "apple",
+            Self::Unavailable => "unavailable",
         }
+    }
+}
+
+#[derive(Clone)]
+struct UnavailableBackend {
+    reason: Arc<String>,
+}
+
+impl UnavailableBackend {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: Arc::new(reason.into()),
+        }
+    }
+
+    fn err(&self) -> HyperboxError {
+        HyperboxError::InvalidConfig((*self.reason).clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl SandboxBackend for UnavailableBackend {
+    async fn create(&self, _config: SandboxConfig) -> Result<SandboxLease> {
+        Err(self.err())
+    }
+
+    async fn exec(
+        &self,
+        _sandbox_id: &SandboxId,
+        _req: hyperbox_core::ExecRequest,
+    ) -> Result<hyperbox_core::ExecOutcome> {
+        Err(self.err())
+    }
+
+    async fn read_file(&self, _sandbox_id: &SandboxId, _path: &str) -> Result<FilePayload> {
+        Err(self.err())
+    }
+
+    async fn write_file(&self, _sandbox_id: &SandboxId, _payload: FilePayload) -> Result<()> {
+        Err(self.err())
+    }
+
+    async fn destroy(&self, _sandbox_id: &SandboxId) -> Result<()> {
+        Err(self.err())
+    }
+
+    async fn inspect(&self, _sandbox_id: &SandboxId) -> Result<SandboxInfo> {
+        Err(self.err())
     }
 }
 
@@ -94,23 +147,35 @@ pub fn resolve_backend(kind: BackendKind) -> BackendSelection {
                 }
             } else {
                 let reason = if !caps.supports_virtualization_framework {
-                    "requested apple backend but host lacks virtualization framework support; falling back to local backend".to_string()
+                    "requested apple backend but host lacks virtualization framework support"
+                        .to_string()
                 } else if launch_command.is_none() {
-                    "requested apple backend but no helper command was discovered; falling back to local backend".to_string()
+                    "requested apple backend but no helper command was discovered".to_string()
                 } else {
-                    "requested apple backend but helper/runtime is not supported on this host; falling back to local backend".to_string()
+                    "requested apple backend but helper/runtime is not supported on this host"
+                        .to_string()
                 };
                 BackendSelection {
                     requested: kind,
-                    selected: BackendKind::Local,
-                    reason,
+                    selected: BackendKind::Unavailable,
+                    reason: format!(
+                        "{reason}; run `hyperbox setup` to install runtime prerequisites"
+                    ),
                     apple_runtime: Some(runtime_kind),
                     apple_helper_command: launch_command,
-                    backend: Arc::new(LocalBackend::new(None)),
+                    backend: Arc::new(UnavailableBackend::new(reason)),
                 }
             }
         }
         BackendKind::Auto => auto_backend_selection(),
+        BackendKind::Unavailable => BackendSelection {
+            requested: kind,
+            selected: BackendKind::Unavailable,
+            reason: "backend marked unavailable".to_string(),
+            apple_runtime: None,
+            apple_helper_command: None,
+            backend: Arc::new(UnavailableBackend::new("backend unavailable")),
+        },
     }
 }
 
@@ -130,14 +195,17 @@ fn auto_backend_selection() -> BackendSelection {
                     backend: Arc::new(build_firecracker_backend()),
                 }
             } else {
+                let reason =
+                    "auto backend requires VM isolation but linux host does not satisfy firecracker capability checks".to_string();
                 BackendSelection {
                     requested: BackendKind::Auto,
-                    selected: BackendKind::Local,
-                    reason: "auto selected local: linux host does not satisfy firecracker capability checks"
-                        .to_string(),
+                    selected: BackendKind::Unavailable,
+                    reason: format!(
+                        "{reason}; set HYPERBOX_BACKEND=local only for non-isolated dev mode"
+                    ),
                     apple_runtime: None,
                     apple_helper_command: None,
-                    backend: Arc::new(LocalBackend::new(None)),
+                    backend: Arc::new(UnavailableBackend::new(reason)),
                 }
             }
         }
@@ -167,33 +235,40 @@ fn auto_backend_selection() -> BackendSelection {
                 }
             } else {
                 let reason = if !caps.supports_virtualization_framework {
-                    "auto selected local: macOS host does not support virtualization framework"
-                        .to_string()
+                    "auto backend requires VM isolation but macOS host lacks virtualization framework support".to_string()
                 } else if helper_command.is_none() {
-                    "auto selected local: no apple helper command was discovered".to_string()
-                } else {
-                    "auto selected local: discovered apple helper/runtime is not supported on this host"
+                    "auto backend requires VM isolation but no Apple helper command was discovered"
                         .to_string()
+                } else {
+                    "auto backend requires VM isolation but discovered Apple helper/runtime is not supported on this host".to_string()
                 };
 
                 BackendSelection {
                     requested: BackendKind::Auto,
-                    selected: BackendKind::Local,
-                    reason,
+                    selected: BackendKind::Unavailable,
+                    reason: format!(
+                        "{reason}; run `hyperbox setup` to install runtime prerequisites"
+                    ),
                     apple_runtime: Some(runtime_kind),
                     apple_helper_command: helper_command,
-                    backend: Arc::new(LocalBackend::new(None)),
+                    backend: Arc::new(UnavailableBackend::new(reason)),
                 }
             }
         }
-        _ => BackendSelection {
-            requested: BackendKind::Auto,
-            selected: BackendKind::Local,
-            reason: format!("auto selected local: unsupported host OS `{os}`"),
-            apple_runtime: None,
-            apple_helper_command: None,
-            backend: Arc::new(LocalBackend::new(None)),
-        },
+        _ => {
+            let reason =
+                format!("auto backend requires VM isolation but host OS `{os}` is unsupported");
+            BackendSelection {
+                requested: BackendKind::Auto,
+                selected: BackendKind::Unavailable,
+                reason: format!(
+                    "{reason}; set HYPERBOX_BACKEND=local only for non-isolated dev mode"
+                ),
+                apple_runtime: None,
+                apple_helper_command: None,
+                backend: Arc::new(UnavailableBackend::new(reason)),
+            }
+        }
     }
 }
 

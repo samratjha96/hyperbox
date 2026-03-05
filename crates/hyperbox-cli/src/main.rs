@@ -17,6 +17,7 @@ use hyperbox_proto::hyperbox::v1::{
 use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, serve_grpc};
 
 mod apple_helper;
+mod setup;
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50051";
 const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:50051";
@@ -104,6 +105,7 @@ enum Command {
         addr: String,
     },
     Probe,
+    Setup,
     Proxy {
         #[arg(long, default_value = "python:3.12")]
         template: String,
@@ -300,6 +302,9 @@ async fn main() -> anyhow::Result<()> {
                     })
                 );
             }
+        }
+        Command::Setup => {
+            setup::run_setup()?;
         }
         Command::Proxy {
             template,
