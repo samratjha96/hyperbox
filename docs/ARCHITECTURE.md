@@ -22,6 +22,8 @@ MVP execution is implemented by `LocalBackend`:
 3. Support file write/read APIs for artifacts
 4. Destroy sandbox and cleanup directory
 
+`workspace_dir` can optionally bind execution to an existing host directory (for coding-agent workflows over a full repository). In this mode, backend destroy does not delete the mapped workspace.
+
 This keeps API compatibility while Firecracker and Apple VM backends mature.
 
 ## Design Alignment

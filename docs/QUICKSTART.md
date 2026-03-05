@@ -15,7 +15,21 @@ cargo test --workspace
 ## Run a command in sandbox
 
 ```bash
-cargo run -p hyperbox-cli -- run --template python:3.12 --cmd "python3 -c 'print(2 + 2)'"
+cargo run -p hyperbox-cli -- run --template python:3.12 --workspace "$PWD" --cmd "python3 -c 'print(2 + 2)'"
+```
+
+## Keep a persistent sandbox for an agent workflow
+
+```bash
+# Starts local control plane automatically if needed and returns sandbox id.
+SANDBOX_ID=$(cargo run -p hyperbox-cli -- create --workspace "$PWD")
+
+# Reuse the same sandbox across many commands.
+cargo run -p hyperbox-cli -- run --sandbox-id "$SANDBOX_ID" --cmd "ls -la"
+cargo run -p hyperbox-cli -- run --sandbox-id "$SANDBOX_ID" --cmd "pytest -q"
+
+# Cleanup when done.
+cargo run -p hyperbox-cli -- destroy --sandbox-id "$SANDBOX_ID"
 ```
 
 ## Write and read artifacts
@@ -45,3 +59,5 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 
 - Firecracker VM runtime is not yet integrated; this repository currently uses a local backend for execution.
 - Network allowlist is currently policy-evaluated in libraries; host firewall enforcement is planned for Linux/macOS backend integration.
+- Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
+- `network=allowlist` and `network=full` are rejected by LocalBackend and Apple backend unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`). This prevents false-positive security behavior.

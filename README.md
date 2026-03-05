@@ -30,12 +30,22 @@ This repository implements the architecture in `DESIGN.md` as a modular Rust wor
 ```bash
 cargo build --workspace
 cargo test --workspace
+cargo run -p hyperbox-cli -- serve --addr 127.0.0.1:50051
 cargo run -p hyperbox-cli -- templates
 cargo run -p hyperbox-cli -- probe
-cargo run -p hyperbox-cli -- run --template python:3.12 --cmd "echo hello"
+cargo run -p hyperbox-cli -- run --template python:3.12 --workspace "$PWD" --cmd "echo hello"
+cargo run -p hyperbox-cli -- create --workspace "$PWD" --json
+cargo run -p hyperbox-cli -- run --sandbox-id <sandbox-id> --cmd "ls -la"
+cargo run -p hyperbox-cli -- destroy --sandbox-id <sandbox-id>
 cargo run -p hyperbox-server
 cargo run -p hyperbox-agent --bin hyperbox-agentd
 cargo run -p hyperbox-cli -- --server-url http://127.0.0.1:50051 bench --template python:3.12 --cmd "python3 -c 'print(1)'" --json
 ```
 
 See `docs/ARCHITECTURE.md` and `docs/QUICKSTART.md` for more detail.
+
+## Network Policy Enforcement
+
+- `network=allowlist` is treated as an enforce-or-fail feature.
+- Local backend rejects networked modes by default.
+- Firecracker requires firewall enforcement enabled (`HYPERBOX_NETWORK_DRY_RUN=0`).

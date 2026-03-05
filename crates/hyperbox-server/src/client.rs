@@ -29,6 +29,7 @@ impl GrpcControlClient {
                 vcpu_count: config.vcpu_count as u32,
                 timeout_secs: config.timeout_secs,
                 env: config.env.into_iter().collect(),
+                workspace_dir: config.workspace_dir.unwrap_or_default(),
                 network_mode: match config.network {
                     NetworkMode::None => pb::NetworkMode::None as i32,
                     NetworkMode::Allowlist(_) => pb::NetworkMode::Allowlist as i32,
@@ -52,7 +53,13 @@ impl GrpcControlClient {
         Ok(SandboxInfo {
             id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
             template: info.template,
-            state: hyperbox_core::SandboxState::Ready,
+            state: match info.state.as_str() {
+                "Provisioning" => hyperbox_core::SandboxState::Provisioning,
+                "Busy" => hyperbox_core::SandboxState::Busy,
+                "Stopped" => hyperbox_core::SandboxState::Stopped,
+                "Failed" => hyperbox_core::SandboxState::Failed,
+                _ => hyperbox_core::SandboxState::Ready,
+            },
             created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
                 .with_timezone(&chrono::Utc),
         })
@@ -91,6 +98,29 @@ impl GrpcControlClient {
             })
             .await?;
         Ok(())
+    }
+
+    pub async fn inspect_sandbox(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+    ) -> anyhow::Result<SandboxInfo> {
+        let info = self
+            .inner
+            .inspect_sandbox(pb::InspectSandboxRequest {
+                sandbox_id: sandbox_id.0.to_string(),
+            })
+            .await?
+            .into_inner()
+            .info
+            .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?;
+
+        Ok(SandboxInfo {
+            id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
+            template: info.template,
+            state: hyperbox_core::SandboxState::Ready,
+            created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+                .with_timezone(&chrono::Utc),
+        })
     }
 
     pub async fn write_file(

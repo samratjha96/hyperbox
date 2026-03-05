@@ -1,5 +1,7 @@
 use std::{
+    collections::BTreeSet,
     collections::HashMap,
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -8,11 +10,12 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    FilePayload, HyperboxError, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
-    SandboxLease, SandboxState,
+    FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
+    SandboxInfo, SandboxLease, SandboxState,
 };
 use hyperbox_network::{
-    FirewallManager, NetworkPolicyEvaluator, RecordingExecutor, ShellExecutor, VmNetworkSpec,
+    CommandExecutor, FirewallManager, NetworkPolicyEvaluator, RecordingExecutor, ShellExecutor,
+    VmNetworkSpec, build_allowlist_population_plan,
 };
 use hyperbox_proto::hyperbox::v1::hyperbox_agent_client::HyperboxAgentClient;
 
@@ -84,11 +87,56 @@ impl FirecrackerBackend {
         let log = base.join("firecracker.log");
         (socket, vsock, log)
     }
+
+    async fn resolve_allowlist_ips(&self, domains: &[String]) -> Result<Vec<IpAddr>> {
+        let mut resolved = BTreeSet::new();
+        for domain in domains {
+            if domain.contains('*') {
+                return Err(HyperboxError::InvalidConfig(
+                    "wildcard allowlist entries are not supported in firecracker backend yet"
+                        .to_string(),
+                ));
+            }
+
+            let entries = tokio::net::lookup_host((domain.as_str(), 443))
+                .await
+                .map_err(|e| {
+                    HyperboxError::ExecutionFailed(format!(
+                        "resolve allowlist domain `{domain}`: {e}"
+                    ))
+                })?;
+            for entry in entries {
+                resolved.insert(entry.ip());
+            }
+        }
+
+        if resolved.is_empty() {
+            return Err(HyperboxError::ExecutionFailed(
+                "allowlist resolution returned zero IP addresses".to_string(),
+            ));
+        }
+
+        Ok(resolved.into_iter().collect())
+    }
 }
 
 #[async_trait::async_trait]
 impl SandboxBackend for FirecrackerBackend {
     async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+        if !matches!(config.network, NetworkMode::None) && self.config.network_dry_run {
+            return Err(HyperboxError::InvalidConfig(
+                "network policy requires real firewall enforcement; set HYPERBOX_NETWORK_DRY_RUN=0"
+                    .to_string(),
+            ));
+        }
+        if let NetworkMode::Allowlist(domains) = &config.network {
+            if domains.is_empty() {
+                return Err(HyperboxError::InvalidConfig(
+                    "allowlist mode requires at least one --allow domain".to_string(),
+                ));
+            }
+        }
+
         tokio::fs::create_dir_all(&self.config.work_dir).await?;
 
         let id = SandboxId::new();
@@ -146,6 +194,17 @@ impl SandboxBackend for FirecrackerBackend {
 
             // Trigger evaluator construction to validate allowlist syntax early.
             let _ = NetworkPolicyEvaluator::new(&config.network);
+
+            if let NetworkMode::Allowlist(domains) = &config.network {
+                let ips = self.resolve_allowlist_ips(domains).await?;
+                let populate = build_allowlist_population_plan(&spec.vm_id, &ips);
+                let executor = ShellExecutor;
+                for command in populate {
+                    executor.run(command).await.map_err(|e| {
+                        HyperboxError::ExecutionFailed(format!("populate allowlist ipset: {e}"))
+                    })?;
+                }
+            }
             Some(spec)
         };
 

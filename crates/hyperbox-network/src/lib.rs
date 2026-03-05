@@ -9,7 +9,7 @@ use hyperbox_core::NetworkMode;
 pub use dns_proxy::{DnsAllowlistProxy, ResolvedIp};
 pub use firewall::{
     CommandExecutor, CommandSpec, FirewallManager, RecordingExecutor, ShellExecutor, VmNetworkSpec,
-    build_apply_plan, build_teardown_plan,
+    build_allowlist_population_plan, build_apply_plan, build_teardown_plan,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

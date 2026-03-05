@@ -1,10 +1,17 @@
-use std::sync::Arc;
+use std::{process::Stdio, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use tokio::time::sleep;
 
-use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig};
-use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend};
+use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId};
+use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, serve_grpc};
+
+const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50051";
+const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:50051";
+const SERVER_STARTUP_RETRIES: usize = 20;
+const SERVER_STARTUP_DELAY_MS: u64 = 150;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -23,6 +30,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Run {
+        #[arg(long)]
+        sandbox_id: Option<String>,
         #[arg(long, default_value = "python:3.12")]
         template: String,
         #[arg(long)]
@@ -33,6 +42,8 @@ enum Command {
         allow: Vec<String>,
         #[arg(long, default_value_t = 60)]
         timeout: u64,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        workspace: Option<String>,
         #[arg(long = "write")]
         writes: Vec<String>,
         #[arg(long = "read")]
@@ -40,9 +51,41 @@ enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Create {
+        #[arg(long, default_value = "python:3.12")]
+        template: String,
+        #[arg(long, value_enum, default_value_t = NetworkArg::None)]
+        network: NetworkArg,
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        #[arg(long, default_value_t = 512)]
+        memory_mb: u32,
+        #[arg(long, default_value_t = 1)]
+        vcpu_count: u8,
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Destroy {
+        #[arg(long)]
+        sandbox_id: String,
+    },
+    Inspect {
+        #[arg(long)]
+        sandbox_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     Templates {
         #[arg(long)]
         disk_root: Option<String>,
+    },
+    Serve {
+        #[arg(long, default_value = DEFAULT_SERVER_ADDR)]
+        addr: String,
     },
     Probe,
     Bench {
@@ -82,19 +125,36 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Run {
+            sandbox_id,
             template,
             cmd,
             network,
             allow,
             timeout,
+            workspace,
             writes,
             reads,
             json,
         } => {
+            if let Some(sandbox_id) = sandbox_id {
+                run_existing_remote(
+                    cli.server_url,
+                    sandbox_id,
+                    cmd,
+                    timeout,
+                    writes,
+                    reads,
+                    json,
+                )
+                .await?;
+                return Ok(());
+            }
+
             let config = SandboxConfig {
                 template,
                 network: network.to_mode(allow),
                 timeout_secs: timeout,
+                workspace_dir: workspace,
                 ..SandboxConfig::default()
             };
 
@@ -102,6 +162,65 @@ async fn main() -> anyhow::Result<()> {
                 run_remote(server_url, config, cmd, timeout, writes, reads, json).await?;
             } else {
                 run_local(config, cmd, timeout, writes, reads, json).await?;
+            }
+        }
+        Command::Create {
+            template,
+            network,
+            allow,
+            timeout,
+            memory_mb,
+            vcpu_count,
+            workspace,
+            json,
+        } => {
+            let mut client = connect_client(cli.server_url, true).await?;
+            let info = client
+                .create_sandbox(SandboxConfig {
+                    template,
+                    memory_mb,
+                    vcpu_count,
+                    network: network.to_mode(allow),
+                    timeout_secs: timeout,
+                    workspace_dir: workspace,
+                    ..SandboxConfig::default()
+                })
+                .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&SandboxInfoResponse {
+                        sandbox_id: info.id.0.to_string(),
+                        template: info.template,
+                        state: format!("{:?}", info.state).to_lowercase(),
+                        created_at: info.created_at.to_rfc3339(),
+                    })?
+                );
+            } else {
+                println!("{}", info.id.0);
+            }
+        }
+        Command::Destroy { sandbox_id } => {
+            let mut client = connect_client(cli.server_url, false).await?;
+            let sandbox_id = parse_sandbox_id(&sandbox_id)?;
+            client.destroy_sandbox(&sandbox_id).await?;
+        }
+        Command::Inspect { sandbox_id, json } => {
+            let mut client = connect_client(cli.server_url, false).await?;
+            let sandbox_id = parse_sandbox_id(&sandbox_id)?;
+            let info = client.inspect_sandbox(&sandbox_id).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&SandboxInfoResponse {
+                        sandbox_id: info.id.0.to_string(),
+                        template: info.template,
+                        state: format!("{:?}", info.state).to_lowercase(),
+                        created_at: info.created_at.to_rfc3339(),
+                    })?
+                );
+            } else {
+                println!("{}", info.id.0);
             }
         }
         Command::Templates { disk_root } => {
@@ -125,6 +244,10 @@ async fn main() -> anyhow::Result<()> {
                     println!("{template}");
                 }
             }
+        }
+        Command::Serve { addr } => {
+            let addr: std::net::SocketAddr = addr.parse()?;
+            serve_grpc(addr).await?;
         }
         Command::Probe => {
             let os = std::env::consts::OS;
@@ -180,6 +303,55 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_sandbox_id(raw: &str) -> anyhow::Result<SandboxId> {
+    let id = uuid::Uuid::parse_str(raw)
+        .with_context(|| format!("invalid sandbox id `{raw}`: expected UUID"))?;
+    Ok(SandboxId(id))
+}
+
+fn spawn_local_server() -> anyhow::Result<()> {
+    let current_exe = std::env::current_exe().context("resolve current executable path")?;
+    let mut cmd = std::process::Command::new(current_exe);
+    cmd.arg("serve")
+        .arg("--addr")
+        .arg(DEFAULT_SERVER_ADDR)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Auto-start should always be functional on a dev host; default to local backend unless caller explicitly set one.
+    if std::env::var_os("HYPERBOX_BACKEND").is_none() {
+        cmd.env("HYPERBOX_BACKEND", "local");
+    }
+
+    cmd.spawn().context("auto-start local server process")?;
+    Ok(())
+}
+
+async fn connect_client(
+    server_url: Option<String>,
+    autostart_default: bool,
+) -> anyhow::Result<GrpcControlClient> {
+    let url = server_url.unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
+    if let Ok(client) = GrpcControlClient::connect(url.clone()).await {
+        return Ok(client);
+    }
+
+    if autostart_default && url == DEFAULT_SERVER_URL {
+        spawn_local_server()?;
+        for _ in 0..SERVER_STARTUP_RETRIES {
+            sleep(Duration::from_millis(SERVER_STARTUP_DELAY_MS)).await;
+            if let Ok(client) = GrpcControlClient::connect(url.clone()).await {
+                return Ok(client);
+            }
+        }
+    }
+
+    GrpcControlClient::connect(url.clone())
+        .await
+        .with_context(|| format!("failed to connect to hyperbox control plane at {url}"))
 }
 
 async fn run_local(
@@ -272,6 +444,47 @@ async fn run_remote(
     Ok(())
 }
 
+async fn run_existing_remote(
+    server_url: Option<String>,
+    sandbox_id: String,
+    cmd: String,
+    timeout: u64,
+    writes: Vec<String>,
+    reads: Vec<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut client = connect_client(server_url, false).await?;
+    let sandbox_id = parse_sandbox_id(&sandbox_id)?;
+
+    for entry in writes {
+        let (path, content) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
+        client
+            .write_file(&sandbox_id, path.to_string(), content.as_bytes().to_vec())
+            .await?;
+    }
+
+    let outcome = client
+        .exec(
+            &sandbox_id,
+            ExecRequest {
+                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
+                timeout_secs: timeout,
+            },
+        )
+        .await?;
+
+    let mut artifacts = Vec::new();
+    for path in reads {
+        let bytes = client.read_file(&sandbox_id, path.clone()).await?;
+        artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
+    }
+
+    emit_result(outcome, artifacts, json)?;
+    Ok(())
+}
+
 fn emit_result(
     outcome: hyperbox_core::ExecOutcome,
     artifacts: Vec<(String, String)>,
@@ -312,6 +525,14 @@ struct RunResponse {
     stdout: String,
     stderr: String,
     artifacts: Vec<(String, String)>,
+}
+
+#[derive(Debug, Serialize)]
+struct SandboxInfoResponse {
+    sandbox_id: String,
+    template: String,
+    state: String,
+    created_at: String,
 }
 
 #[derive(Debug, Serialize)]

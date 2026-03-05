@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -32,16 +33,21 @@ class Sandbox:
         self,
         template: str = "python:3.12",
         memory_mb: int = 512,
+        vcpu_count: int = 1,
         network: Iterable[str] | str | None = None,
         timeout_secs: int = 60,
+        workspace: str | None = None,
         hyperbox_bin: str = "hyperbox",
         server_url: str | None = None,
     ) -> None:
         self.template = template
         self.memory_mb = memory_mb
+        self.vcpu_count = vcpu_count
         self.timeout_secs = timeout_secs
+        self.workspace = workspace or os.getcwd()
         self.hyperbox_bin = hyperbox_bin
         self.server_url = server_url
+        self._sandbox_id: str | None = None
 
         if network is None:
             self.network_mode = "none"
@@ -56,11 +62,33 @@ class Sandbox:
             self.network_mode = "allowlist"
             self.allowlist = list(network)
 
+    @property
+    def sandbox_id(self) -> str | None:
+        return self._sandbox_id
+
     def __enter__(self) -> "Sandbox":
+        self._ensure_sandbox()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        return None
+        self.close(suppress_errors=True)
+
+    def __del__(self) -> None:
+        self.close(suppress_errors=True)
+
+    def close(self, *, suppress_errors: bool = False) -> None:
+        sandbox_id = self._sandbox_id
+        if not sandbox_id:
+            return
+
+        self._sandbox_id = None
+        cmd = self._base_command()
+        cmd.extend(["destroy", "--sandbox-id", sandbox_id])
+        try:
+            subprocess.run(cmd, check=True, text=True, capture_output=True)
+        except Exception:
+            if not suppress_errors:
+                raise
 
     def exec(
         self,
@@ -70,24 +98,20 @@ class Sandbox:
         reads: Iterable[str] | None = None,
         timeout_secs: int | None = None,
     ) -> ExecResult:
+        sandbox_id = self._ensure_sandbox()
         cmd = self._base_command()
         cmd.extend(
             [
                 "run",
-                "--template",
-                self.template,
+                "--sandbox-id",
+                sandbox_id,
                 "--cmd",
                 command,
                 "--timeout",
                 str(timeout_secs or self.timeout_secs),
-                "--network",
-                self.network_mode,
                 "--json",
             ]
         )
-
-        for domain in self.allowlist:
-            cmd.extend(["--allow", domain])
 
         for path, content in (writes or {}).items():
             cmd.extend(["--write", f"{path}={content}"])
@@ -134,6 +158,40 @@ class Sandbox:
             min_ms=int(payload["min_ms"]),
             max_ms=int(payload["max_ms"]),
         )
+
+    def _ensure_sandbox(self) -> str:
+        if self._sandbox_id:
+            return self._sandbox_id
+
+        cmd = self._base_command()
+        cmd.extend(
+            [
+                "create",
+                "--template",
+                self.template,
+                "--memory-mb",
+                str(self.memory_mb),
+                "--vcpu-count",
+                str(self.vcpu_count),
+                "--timeout",
+                str(self.timeout_secs),
+                "--workspace",
+                self.workspace,
+                "--network",
+                self.network_mode,
+                "--json",
+            ]
+        )
+
+        for domain in self.allowlist:
+            cmd.extend(["--allow", domain])
+
+        payload = self._run_json(cmd)
+        sandbox_id = str(payload["sandbox_id"]).strip()
+        if not sandbox_id:
+            raise RuntimeError("hyperbox create returned empty sandbox_id")
+        self._sandbox_id = sandbox_id
+        return sandbox_id
 
     def _base_command(self) -> list[str]:
         cmd = [self.hyperbox_bin]

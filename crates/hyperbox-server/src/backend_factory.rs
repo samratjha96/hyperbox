@@ -102,7 +102,7 @@ fn build_firecracker_backend() -> FirecrackerBackend {
         host_iface: std::env::var("HYPERBOX_HOST_IFACE").unwrap_or_else(|_| "eth0".to_string()),
         network_dry_run: std::env::var("HYPERBOX_NETWORK_DRY_RUN")
             .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(true),
+            .unwrap_or(false),
     })
 }
 

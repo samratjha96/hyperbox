@@ -4,8 +4,8 @@ use chrono::Utc;
 use tokio::{process::Child, sync::Mutex};
 
 use hyperbox_core::{
-    FilePayload, HyperboxError, Result, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
-    SandboxLease, SandboxState,
+    FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
+    SandboxInfo, SandboxLease, SandboxState,
 };
 use hyperbox_proto::hyperbox::v1::hyperbox_agent_client::HyperboxAgentClient;
 
@@ -80,6 +80,13 @@ impl AppleVzBackend {
 #[async_trait::async_trait]
 impl SandboxBackend for AppleVzBackend {
     async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+        if !matches!(config.network, NetworkMode::None) {
+            return Err(HyperboxError::InvalidConfig(
+                "apple backend network policy enforcement is not implemented yet; use network=none"
+                    .to_string(),
+            ));
+        }
+
         tokio::fs::create_dir_all(&self.config.work_dir).await?;
 
         let id = SandboxId::new();

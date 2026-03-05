@@ -56,6 +56,11 @@ fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
         } else {
             config.vcpu_count as u8
         },
+        workspace_dir: if config.workspace_dir.is_empty() {
+            None
+        } else {
+            Some(config.workspace_dir)
+        },
         network,
         env: config.env.into_iter().collect(),
         timeout_secs: if config.timeout_secs == 0 {

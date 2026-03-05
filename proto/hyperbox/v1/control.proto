@@ -10,6 +10,7 @@ message SandboxConfig {
   map<string, string> env = 5;
   NetworkMode network_mode = 6;
   repeated string network_allowlist = 7;
+  string workspace_dir = 8;
 }
 
 message SandboxId {

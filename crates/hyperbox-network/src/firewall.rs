@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{net::IpAddr, sync::Arc};
 
 use anyhow::Context;
 use tokio::sync::Mutex;
@@ -223,6 +223,22 @@ pub fn build_teardown_plan(spec: &VmNetworkSpec) -> Vec<CommandSpec> {
     ]
 }
 
+pub fn build_allowlist_population_plan(vm_id: &str, ips: &[IpAddr]) -> Vec<CommandSpec> {
+    ips.iter()
+        .map(|ip| CommandSpec {
+            program: "ipset".to_string(),
+            args: vec![
+                "add".to_string(),
+                format!("vm_{}_allowed", vm_id),
+                ip.to_string(),
+                "timeout".to_string(),
+                "300".to_string(),
+                "-exist".to_string(),
+            ],
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +262,20 @@ mod tests {
         assert!(
             plan.iter()
                 .any(|c| c.args.iter().any(|a| a.contains("@vm_abc_allowed")))
+        );
+    }
+
+    #[test]
+    fn population_plan_adds_each_ip() {
+        let ips = vec![
+            "1.1.1.1".parse().expect("ip"),
+            "2606:4700:4700::1111".parse().expect("ip"),
+        ];
+        let plan = build_allowlist_population_plan("abc", &ips);
+        assert_eq!(plan.len(), 2);
+        assert!(
+            plan.iter()
+                .all(|c| c.program == "ipset" && c.args.first() == Some(&"add".to_string()))
         );
     }
 }

@@ -13,9 +13,12 @@ pip install -e hyperbox-py
 ```python
 from hyperbox import Sandbox
 
-with Sandbox(template="python:3.12", network=["pypi.org", "api.openai.com"]) as box:
-    result = box.run_python("print('hello from hyperbox')")
+# Sandbox context now creates one persistent sandbox and reuses it
+# across all commands. By default it maps to the current workspace dir.
+with Sandbox(template="python:3.12", workspace=".") as box:
+    result = box.exec("ls -la")
     print(result.stdout)
+    print(box.sandbox_id)
 
 # Optional remote server mode
 with Sandbox(server_url="http://127.0.0.1:50051") as box:
