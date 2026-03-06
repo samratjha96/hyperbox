@@ -22,6 +22,7 @@ Default behavior:
 - `hyperbox run/create/proxy` now go through the control-plane server path by default (not direct local backend calls).
 - Backend selection is `auto` by default.
 - On macOS, `auto` mode requires VM-capable backend. If Apple runtime prerequisites are missing, commands fail fast (no silent fallback).
+- On Linux, Firecracker backend now auto-starts an embedded `hyperbox-agent` sidecar by default when the configured agent endpoint is unavailable.
 - Overrides remain available for power users through `HYPERBOX_BACKEND`, `HYPERBOX_APPLE_RUNTIME`, and `HYPERBOX_APPLE_HELPER`.
 
 ## One-time runtime setup (macOS)
@@ -98,7 +99,9 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 
 - Network allowlist is currently policy-evaluated in libraries; host firewall enforcement is planned for Linux/macOS backend integration.
 - Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
+- Firecracker backend maps each sandbox to `HYPERBOX_AGENT_ROOT/<sandbox-id>` for exec/file I/O. With `--workspace`, this path is linked to the provided workspace directory so agent operations run against the repo directly.
 - `network=allowlist` and `network=full` are rejected by LocalBackend and Apple backend unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`). This prevents false-positive security behavior.
+- Firecracker agent auto-start can be disabled via `HYPERBOX_AGENT_AUTOSTART=0` (then `HYPERBOX_AGENT_ENDPOINT` must already be serving).
 - On macOS, backend runtime selection can be forced with `HYPERBOX_APPLE_RUNTIME=containerization|virtualization`; auto mode prefers containerization only when available on host.
 - Apple backend supports a helper bridge command (`HYPERBOX_APPLE_HELPER`) for native runtime integration; protocol is documented in `docs/APPLE_HELPER_PROTOCOL.md`.
 - Built-in helper command: `export HYPERBOX_APPLE_HELPER=\"hyperbox apple-helper\"` (uses Apple `container` CLI and bind-mounts `--workspace` to `/workspace`).
