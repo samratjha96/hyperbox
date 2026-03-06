@@ -308,6 +308,12 @@ fn build_firecracker_backend() -> FirecrackerBackend {
         kernel_image,
         agent_endpoint: std::env::var("HYPERBOX_AGENT_ENDPOINT")
             .unwrap_or_else(|_| "http://127.0.0.1:60061".to_string()),
+        agent_root: std::env::var("HYPERBOX_AGENT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("hyperbox-agentd")),
+        auto_start_agent: std::env::var("HYPERBOX_AGENT_AUTOSTART")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true),
         rootfs_by_template,
         host_iface: std::env::var("HYPERBOX_HOST_IFACE").unwrap_or_else(|_| "eth0".to_string()),
         network_dry_run: std::env::var("HYPERBOX_NETWORK_DRY_RUN")

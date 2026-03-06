@@ -1,14 +1,18 @@
 use std::{
     collections::BTreeSet,
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use chrono::Utc;
-use tokio::{sync::Mutex, task::JoinHandle, time::Duration};
-use tracing::warn;
+use tokio::{
+    sync::Mutex,
+    task::JoinHandle,
+    time::{Duration, sleep},
+};
+use tracing::{info, warn};
 
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
@@ -28,6 +32,8 @@ pub struct FirecrackerBackendConfig {
     pub firecracker_binary: FirecrackerBinary,
     pub kernel_image: PathBuf,
     pub agent_endpoint: String,
+    pub agent_root: PathBuf,
+    pub auto_start_agent: bool,
     pub rootfs_by_template: HashMap<String, PathBuf>,
     pub host_iface: String,
     pub network_dry_run: bool,
@@ -40,11 +46,20 @@ impl Default for FirecrackerBackendConfig {
             firecracker_binary: FirecrackerBinary::default(),
             kernel_image: PathBuf::from("/var/lib/hyperbox/vmlinux"),
             agent_endpoint: "http://127.0.0.1:60061".to_string(),
+            agent_root: std::env::temp_dir().join("hyperbox-agentd"),
+            auto_start_agent: true,
             rootfs_by_template: HashMap::new(),
             host_iface: "eth0".to_string(),
             network_dry_run: true,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AgentWorkspaceBinding {
+    path: PathBuf,
+    managed: bool,
+    linked_workspace: bool,
 }
 
 #[derive(Debug)]
@@ -54,12 +69,19 @@ struct FirecrackerSandbox {
     vm: RunningVm,
     network_spec: Option<VmNetworkSpec>,
     allowlist_sync_task: Option<JoinHandle<()>>,
+    agent_workspace: AgentWorkspaceBinding,
+}
+
+#[derive(Debug, Default)]
+struct AgentRuntimeState {
+    started: bool,
 }
 
 #[derive(Clone)]
 pub struct FirecrackerBackend {
     config: FirecrackerBackendConfig,
     sandboxes: Arc<Mutex<HashMap<SandboxId, FirecrackerSandbox>>>,
+    agent_runtime: Arc<Mutex<AgentRuntimeState>>,
 }
 
 impl FirecrackerBackend {
@@ -67,6 +89,7 @@ impl FirecrackerBackend {
         Self {
             config,
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
+            agent_runtime: Arc::new(Mutex::new(AgentRuntimeState::default())),
         }
     }
 
@@ -93,6 +116,190 @@ impl FirecrackerBackend {
     async fn resolve_allowlist_ips(&self, domains: &[String]) -> Result<Vec<IpAddr>> {
         resolve_allowlist_ips(domains).await
     }
+
+    async fn ensure_agent_running(&self) -> Result<()> {
+        if !self.config.auto_start_agent {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "connect agent: endpoint {} is unavailable and auto-start is disabled",
+                self.config.agent_endpoint
+            )));
+        }
+
+        let addr = parse_agent_socket_addr(&self.config.agent_endpoint)?;
+        let root = self.config.agent_root.clone();
+        let mut state = self.agent_runtime.lock().await;
+        if state.started {
+            return Ok(());
+        }
+        state.started = true;
+        info!(
+            endpoint = %self.config.agent_endpoint,
+            root = %root.display(),
+            "starting embedded firecracker agent sidecar"
+        );
+        tokio::spawn(async move {
+            if let Err(err) = hyperbox_agent::serve_agent(addr, root).await {
+                warn!(error = %err, "embedded firecracker agent sidecar exited");
+            }
+        });
+        Ok(())
+    }
+
+    async fn connect_agent(&self) -> Result<HyperboxAgentClient<tonic::transport::Channel>> {
+        match HyperboxAgentClient::connect(self.config.agent_endpoint.clone()).await {
+            Ok(client) => Ok(client),
+            Err(first_err) => {
+                self.ensure_agent_running().await?;
+                let mut last_error = first_err.to_string();
+                for _ in 0..20 {
+                    sleep(Duration::from_millis(100)).await;
+                    match HyperboxAgentClient::connect(self.config.agent_endpoint.clone()).await {
+                        Ok(client) => return Ok(client),
+                        Err(err) => {
+                            last_error = err.to_string();
+                        }
+                    }
+                }
+                let mut state = self.agent_runtime.lock().await;
+                state.started = false;
+                Err(HyperboxError::ExecutionFailed(format!(
+                    "connect agent at {} after auto-start: {last_error}",
+                    self.config.agent_endpoint
+                )))
+            }
+        }
+    }
+
+    async fn prepare_agent_workspace(
+        &self,
+        sandbox_id: &SandboxId,
+        config: &SandboxConfig,
+    ) -> Result<AgentWorkspaceBinding> {
+        tokio::fs::create_dir_all(&self.config.agent_root).await?;
+        let sandbox_path = self.config.agent_root.join(sandbox_id.0.to_string());
+        remove_existing_path(&sandbox_path).await?;
+
+        if let Some(workspace_dir) = &config.workspace_dir {
+            let workspace = resolve_workspace_dir(workspace_dir).await?;
+            create_symlink(&workspace, &sandbox_path).map_err(|e| {
+                HyperboxError::ExecutionFailed(format!(
+                    "link agent sandbox path `{}` -> `{}`: {e}",
+                    sandbox_path.display(),
+                    workspace.display()
+                ))
+            })?;
+            return Ok(AgentWorkspaceBinding {
+                path: sandbox_path,
+                managed: false,
+                linked_workspace: true,
+            });
+        }
+
+        tokio::fs::create_dir_all(&sandbox_path).await?;
+        Ok(AgentWorkspaceBinding {
+            path: sandbox_path,
+            managed: true,
+            linked_workspace: false,
+        })
+    }
+
+    async fn cleanup_agent_workspace(&self, binding: &AgentWorkspaceBinding) -> Result<()> {
+        if binding.linked_workspace {
+            match tokio::fs::remove_file(&binding.path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "remove agent workspace link `{}`: {err}",
+                        binding.path.display()
+                    )));
+                }
+            }
+            return Ok(());
+        }
+
+        if binding.managed {
+            match tokio::fs::remove_dir_all(&binding.path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "remove managed agent workspace `{}`: {err}",
+                        binding.path.display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn parse_agent_socket_addr(endpoint: &str) -> Result<SocketAddr> {
+    let without_scheme = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+    without_scheme.parse::<SocketAddr>().map_err(|e| {
+        HyperboxError::InvalidConfig(format!(
+            "invalid HYPERBOX_AGENT_ENDPOINT `{endpoint}`: expected host:port ({e})"
+        ))
+    })
+}
+
+async fn remove_existing_path(path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                tokio::fs::remove_file(path).await?;
+            } else if metadata.is_dir() {
+                tokio::fs::remove_dir_all(path).await?;
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(HyperboxError::ExecutionFailed(format!(
+            "inspect path `{}`: {err}",
+            path.display()
+        ))),
+    }
+}
+
+async fn resolve_workspace_dir(raw: &str) -> Result<PathBuf> {
+    let candidate = PathBuf::from(raw);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        std::env::current_dir()
+            .map_err(|e| HyperboxError::ExecutionFailed(format!("resolve current dir: {e}")))?
+            .join(candidate)
+    };
+    tokio::fs::create_dir_all(&resolved).await?;
+    let canonical = tokio::fs::canonicalize(&resolved).await.map_err(|e| {
+        HyperboxError::ExecutionFailed(format!(
+            "canonicalize workspace `{}`: {e}",
+            resolved.display()
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(HyperboxError::ExecutionFailed(format!(
+            "workspace_dir must be a directory: {}",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn create_symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink is unsupported on this platform",
+    ))
 }
 
 async fn resolve_allowlist_ips(domains: &[String]) -> Result<Vec<IpAddr>> {
@@ -260,6 +467,7 @@ impl SandboxBackend for FirecrackerBackend {
             state: SandboxState::Ready,
             created_at: Utc::now(),
         };
+        let agent_workspace = self.prepare_agent_workspace(&id, &config).await?;
 
         self.sandboxes.lock().await.insert(
             id.clone(),
@@ -269,6 +477,7 @@ impl SandboxBackend for FirecrackerBackend {
                 vm,
                 network_spec,
                 allowlist_sync_task,
+                agent_workspace,
             },
         );
 
@@ -291,9 +500,7 @@ impl SandboxBackend for FirecrackerBackend {
             return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
         }
 
-        let mut agent = HyperboxAgentClient::connect(self.config.agent_endpoint.clone())
-            .await
-            .map_err(|e| HyperboxError::ExecutionFailed(format!("connect agent: {e}")))?;
+        let mut agent = self.connect_agent().await?;
 
         let response = agent
             .exec(hyperbox_proto::hyperbox::v1::ExecRequest {
@@ -319,9 +526,7 @@ impl SandboxBackend for FirecrackerBackend {
             return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
         }
 
-        let mut agent = HyperboxAgentClient::connect(self.config.agent_endpoint.clone())
-            .await
-            .map_err(|e| HyperboxError::ExecutionFailed(format!("connect agent: {e}")))?;
+        let mut agent = self.connect_agent().await?;
 
         let response = agent
             .read_file(hyperbox_proto::hyperbox::v1::ReadFileRequest {
@@ -344,9 +549,7 @@ impl SandboxBackend for FirecrackerBackend {
             return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
         }
 
-        let mut agent = HyperboxAgentClient::connect(self.config.agent_endpoint.clone())
-            .await
-            .map_err(|e| HyperboxError::ExecutionFailed(format!("connect agent: {e}")))?;
+        let mut agent = self.connect_agent().await?;
 
         agent
             .write_file(hyperbox_proto::hyperbox::v1::WriteFileRequest {
@@ -389,6 +592,8 @@ impl SandboxBackend for FirecrackerBackend {
             .terminate()
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("terminate vm: {e}")))?;
+        self.cleanup_agent_workspace(&sandbox.agent_workspace)
+            .await?;
         Ok(())
     }
 
@@ -402,5 +607,74 @@ impl SandboxBackend for FirecrackerBackend {
                 s.info.clone()
             })
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FirecrackerBackend, FirecrackerBackendConfig, parse_agent_socket_addr};
+    use hyperbox_core::{NetworkMode, SandboxConfig, SandboxId};
+
+    #[test]
+    fn parses_agent_socket_addr_from_url() {
+        let parsed = parse_agent_socket_addr("http://127.0.0.1:60061").expect("parse endpoint");
+        assert_eq!(parsed.to_string(), "127.0.0.1:60061");
+    }
+
+    #[test]
+    fn rejects_invalid_agent_endpoint() {
+        let err =
+            parse_agent_socket_addr("http://localhost").expect_err("invalid endpoint must fail");
+        assert!(
+            err.to_string()
+                .contains("invalid HYPERBOX_AGENT_ENDPOINT `http://localhost`")
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_agent_workspace_links_shared_workspace() {
+        let base = std::env::temp_dir().join(format!(
+            "hyperbox-firecracker-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let agent_root = base.join("agent-root");
+        let workspace = base.join("workspace");
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+
+        let backend = FirecrackerBackend::new(FirecrackerBackendConfig {
+            agent_root: agent_root.clone(),
+            ..FirecrackerBackendConfig::default()
+        });
+        let sandbox_id = SandboxId::new();
+        let binding = backend
+            .prepare_agent_workspace(
+                &sandbox_id,
+                &SandboxConfig {
+                    workspace_dir: Some(workspace.to_string_lossy().to_string()),
+                    network: NetworkMode::None,
+                    ..SandboxConfig::default()
+                },
+            )
+            .await
+            .expect("prepare linked workspace");
+
+        let metadata = tokio::fs::symlink_metadata(&binding.path)
+            .await
+            .expect("workspace binding metadata");
+        assert!(metadata.file_type().is_symlink());
+        assert!(binding.linked_workspace);
+        assert!(!binding.managed);
+
+        backend
+            .cleanup_agent_workspace(&binding)
+            .await
+            .expect("cleanup linked workspace");
+        assert!(!binding.path.exists());
+
+        tokio::fs::remove_dir_all(&base)
+            .await
+            .expect("cleanup test base");
     }
 }

@@ -10,6 +10,7 @@ repository.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+hyperbox-agent = { path = "../hyperbox-agent" }
 hyperbox-core = { path = "../hyperbox-core" }
 hyperbox-network = { path = "../hyperbox-network" }
 hyperbox-proto = { path = "../hyperbox-proto" }

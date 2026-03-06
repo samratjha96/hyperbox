@@ -685,6 +685,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "hyperbox-agent",
  "hyperbox-core",
  "hyperbox-network",
  "hyperbox-proto",
