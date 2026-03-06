@@ -1,12 +1,19 @@
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Instant,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::Mutex,
+    time::{Duration, timeout},
 };
 use tracing::{debug, info, warn};
 
@@ -17,6 +24,10 @@ use hyperbox_core::{
 use hyperbox_proto::hyperbox::v1::hyperbox_agent_client::HyperboxAgentClient;
 
 use crate::detect_macos_capabilities;
+
+const WORKDIR_IN_CONTAINER: &str = "/workspace";
+const DEFAULT_IO_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_DESTROY_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppleRuntimeKind {
@@ -127,6 +138,22 @@ impl AppleHelperSession {
 struct AppleSandbox {
     info: SandboxInfo,
     config: SandboxConfig,
+    direct_container: Option<DirectContainerSandbox>,
+}
+
+#[derive(Debug, Clone)]
+struct DirectContainerSandbox {
+    container_name: String,
+    workspace_host: PathBuf,
+    ephemeral_workspace: bool,
+}
+
+#[derive(Debug)]
+struct CommandResult {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    duration_ms: u64,
 }
 
 #[derive(Clone)]
@@ -134,14 +161,17 @@ pub struct AppleVzBackend {
     config: AppleBackendConfig,
     sandboxes: Arc<Mutex<HashMap<SandboxId, AppleSandbox>>>,
     helper_session: Arc<Mutex<Option<AppleHelperSession>>>,
+    direct_container_bin: Option<String>,
 }
 
 impl AppleVzBackend {
     pub fn new(config: AppleBackendConfig) -> Self {
+        let direct_container_bin = resolve_direct_container_bin(config.launch_command.as_ref());
         Self {
             config,
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
             helper_session: Arc::new(Mutex::new(None)),
+            direct_container_bin,
         }
     }
 
@@ -150,6 +180,10 @@ impl AppleVzBackend {
             AppleRuntimeKind::Containerization => "containerization",
             AppleRuntimeKind::Virtualization => "virtualization",
         }
+    }
+
+    fn use_direct_container_mode(&self) -> bool {
+        self.direct_container_bin.is_some()
     }
 
     async fn ensure_helper_session(&self) -> Result<()> {
@@ -217,6 +251,248 @@ impl AppleVzBackend {
             }
         }
     }
+
+    async fn create_direct_container(
+        &self,
+        sandbox_id: &SandboxId,
+        config: &SandboxConfig,
+    ) -> Result<DirectContainerSandbox> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let ephemeral_workspace = config.workspace_dir.is_none();
+        let workspace_host = if let Some(dir) = &config.workspace_dir {
+            let path = PathBuf::from(dir);
+            let canonical = tokio::fs::canonicalize(&path).await.map_err(|e| {
+                HyperboxError::ExecutionFailed(format!(
+                    "workspace_dir does not exist or is not accessible `{}`: {e}",
+                    path.display()
+                ))
+            })?;
+            if !canonical.is_dir() {
+                return Err(HyperboxError::ExecutionFailed(format!(
+                    "workspace_dir must be a directory: {}",
+                    canonical.display()
+                )));
+            }
+            canonical
+        } else {
+            let workspace = self
+                .config
+                .work_dir
+                .join(sandbox_id.0.to_string())
+                .join("workspace");
+            tokio::fs::create_dir_all(&workspace).await.map_err(|e| {
+                HyperboxError::ExecutionFailed(format!(
+                    "create workspace directory `{}`: {e}",
+                    workspace.display()
+                ))
+            })?;
+            workspace
+        };
+
+        let container_name = format!("hyperbox-{}", sandbox_id.0);
+        let cpus = config.vcpu_count.max(1);
+        let memory_mb = config.memory_mb.max(1);
+        let mount = format!("{}:{WORKDIR_IN_CONTAINER}", workspace_host.display());
+        let args = vec![
+            "run".to_string(),
+            "--detach".to_string(),
+            "--progress".to_string(),
+            "none".to_string(),
+            "--name".to_string(),
+            container_name.clone(),
+            "--cpus".to_string(),
+            cpus.to_string(),
+            "--memory".to_string(),
+            format!("{memory_mb}M"),
+            "--network".to_string(),
+            "none".to_string(),
+            "--workdir".to_string(),
+            WORKDIR_IN_CONTAINER.to_string(),
+            "--volume".to_string(),
+            mount,
+            config.template.clone(),
+            "sleep".to_string(),
+            "infinity".to_string(),
+        ];
+        let result =
+            run_container_command(container_bin, args, None, DEFAULT_IO_TIMEOUT_SECS).await?;
+        if result.exit_code != 0 {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "container run failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+
+        Ok(DirectContainerSandbox {
+            container_name,
+            workspace_host,
+            ephemeral_workspace,
+        })
+    }
+
+    async fn exec_direct(
+        &self,
+        direct: &DirectContainerSandbox,
+        req: hyperbox_core::ExecRequest,
+    ) -> Result<hyperbox_core::ExecOutcome> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let mut args = vec![
+            "exec".to_string(),
+            "--workdir".to_string(),
+            WORKDIR_IN_CONTAINER.to_string(),
+            direct.container_name.clone(),
+        ];
+        args.extend(req.command);
+        let result =
+            run_container_command(container_bin, args, None, req.timeout_secs.max(1)).await?;
+        Ok(hyperbox_core::ExecOutcome {
+            exit_code: result.exit_code,
+            stdout: String::from_utf8_lossy(&result.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&result.stderr).to_string(),
+            duration_ms: result.duration_ms as u128,
+        })
+    }
+
+    async fn read_file_direct(
+        &self,
+        direct: &DirectContainerSandbox,
+        path: &str,
+    ) -> Result<FilePayload> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let relative = normalize_relative_path(path)?;
+        let container_path = path_in_container(&relative);
+        let args = vec![
+            "exec".to_string(),
+            "--workdir".to_string(),
+            WORKDIR_IN_CONTAINER.to_string(),
+            direct.container_name.clone(),
+            "/usr/bin/env".to_string(),
+            "cat".to_string(),
+            container_path,
+        ];
+        let result =
+            run_container_command(container_bin, args, None, DEFAULT_IO_TIMEOUT_SECS).await?;
+        if result.exit_code != 0 {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "read failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+        Ok(FilePayload {
+            path: path.to_string().into(),
+            bytes: result.stdout,
+        })
+    }
+
+    async fn write_file_direct(
+        &self,
+        direct: &DirectContainerSandbox,
+        payload: FilePayload,
+    ) -> Result<()> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let relative = normalize_relative_path(payload.path.as_str())?;
+        let container_path = path_in_container(&relative);
+
+        if let Some(parent) = relative.parent() {
+            if !parent.as_os_str().is_empty() {
+                let parent_in_container = path_in_container(parent);
+                let mkdir_args = vec![
+                    "exec".to_string(),
+                    "--workdir".to_string(),
+                    WORKDIR_IN_CONTAINER.to_string(),
+                    direct.container_name.clone(),
+                    "/usr/bin/env".to_string(),
+                    "mkdir".to_string(),
+                    "-p".to_string(),
+                    parent_in_container,
+                ];
+                let mkdir_result =
+                    run_container_command(container_bin, mkdir_args, None, DEFAULT_IO_TIMEOUT_SECS)
+                        .await?;
+                if mkdir_result.exit_code != 0 {
+                    return Err(HyperboxError::ExecutionFailed(format!(
+                        "create parent directory failed (exit={}): {}",
+                        mkdir_result.exit_code,
+                        String::from_utf8_lossy(&mkdir_result.stderr)
+                    )));
+                }
+            }
+        }
+
+        let write_args = vec![
+            "exec".to_string(),
+            "--interactive".to_string(),
+            "--workdir".to_string(),
+            WORKDIR_IN_CONTAINER.to_string(),
+            direct.container_name.clone(),
+            "/usr/bin/env".to_string(),
+            "tee".to_string(),
+            container_path,
+        ];
+        let write_result = run_container_command(
+            container_bin,
+            write_args,
+            Some(payload.bytes),
+            DEFAULT_IO_TIMEOUT_SECS,
+        )
+        .await?;
+        if write_result.exit_code != 0 {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "write failed (exit={}): {}",
+                write_result.exit_code,
+                String::from_utf8_lossy(&write_result.stderr)
+            )));
+        }
+        Ok(())
+    }
+
+    async fn destroy_direct_container(&self, direct: DirectContainerSandbox) -> Result<()> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let args = vec![
+            "delete".to_string(),
+            "--force".to_string(),
+            direct.container_name.clone(),
+        ];
+        let result =
+            run_container_command(container_bin, args, None, DEFAULT_DESTROY_TIMEOUT_SECS).await?;
+        if result.exit_code != 0 {
+            let stderr = String::from_utf8_lossy(&result.stderr).to_lowercase();
+            if !stderr.contains("not found") {
+                return Err(HyperboxError::ExecutionFailed(format!(
+                    "container delete failed (exit={}): {}",
+                    result.exit_code,
+                    String::from_utf8_lossy(&result.stderr)
+                )));
+            }
+        }
+
+        if direct.ephemeral_workspace {
+            tokio::fs::remove_dir_all(&direct.workspace_host)
+                .await
+                .map_err(|e| {
+                    HyperboxError::ExecutionFailed(format!(
+                        "remove ephemeral workspace `{}`: {e}",
+                        direct.workspace_host.display()
+                    ))
+                })?;
+            if let Some(sandbox_root) = direct.workspace_host.parent() {
+                let _ = tokio::fs::remove_dir(sandbox_root).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -261,7 +537,17 @@ impl SandboxBackend for AppleVzBackend {
             created_at: Utc::now(),
         };
 
-        if self.config.launch_command.is_some() {
+        let direct_container = if self.use_direct_container_mode() {
+            let direct_create_started = Instant::now();
+            let direct = self.create_direct_container(&id, &config).await?;
+            debug!(
+                sandbox_id = %id.0,
+                stage = "direct_create",
+                elapsed_ms = direct_create_started.elapsed().as_millis() as u64,
+                "apple direct container create finished"
+            );
+            Some(direct)
+        } else if self.config.launch_command.is_some() {
             let helper_create_started = std::time::Instant::now();
             let response = self
                 .helper_request(&HelperRequest::Create {
@@ -292,13 +578,17 @@ impl SandboxBackend for AppleVzBackend {
                     )));
                 }
             }
-        }
+            None
+        } else {
+            None
+        };
 
         self.sandboxes.lock().await.insert(
             id.clone(),
             AppleSandbox {
                 info: info.clone(),
                 config,
+                direct_container,
             },
         );
         info!(
@@ -317,8 +607,26 @@ impl SandboxBackend for AppleVzBackend {
         req: hyperbox_core::ExecRequest,
     ) -> Result<hyperbox_core::ExecOutcome> {
         let exec_started = std::time::Instant::now();
-        if self.sandboxes.lock().await.get(sandbox_id).is_none() {
-            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+
+        let direct_container = {
+            let sandboxes = self.sandboxes.lock().await;
+            let sandbox = sandboxes
+                .get(sandbox_id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+            sandbox.direct_container.clone()
+        };
+
+        if let Some(direct) = direct_container {
+            let outcome = self.exec_direct(&direct, req).await?;
+            info!(
+                sandbox_id = %sandbox_id.0,
+                stage = "exec_direct",
+                helper_exec_ms = outcome.duration_ms as u64,
+                backend_elapsed_ms = exec_started.elapsed().as_millis() as u64,
+                exit_code = outcome.exit_code,
+                "apple backend exec completed via direct container path"
+            );
+            return Ok(outcome);
         }
 
         if self.config.launch_command.is_some() {
@@ -394,8 +702,16 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
-        if self.sandboxes.lock().await.get(sandbox_id).is_none() {
-            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+        let direct_container = {
+            let sandboxes = self.sandboxes.lock().await;
+            let sandbox = sandboxes
+                .get(sandbox_id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+            sandbox.direct_container.clone()
+        };
+
+        if let Some(direct) = direct_container {
+            return self.read_file_direct(&direct, path).await;
         }
 
         if self.config.launch_command.is_some() {
@@ -446,8 +762,16 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
-        if self.sandboxes.lock().await.get(sandbox_id).is_none() {
-            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+        let direct_container = {
+            let sandboxes = self.sandboxes.lock().await;
+            let sandbox = sandboxes
+                .get(sandbox_id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+            sandbox.direct_container.clone()
+        };
+
+        if let Some(direct) = direct_container {
+            return self.write_file_direct(&direct, payload).await;
         }
 
         if self.config.launch_command.is_some() {
@@ -489,14 +813,16 @@ impl SandboxBackend for AppleVzBackend {
 
     async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
         let destroy_started = std::time::Instant::now();
-        let _sandbox = self
+        let sandbox = self
             .sandboxes
             .lock()
             .await
             .remove(sandbox_id)
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
-        if self.config.launch_command.is_some() {
+        if let Some(direct) = sandbox.direct_container {
+            self.destroy_direct_container(direct).await?;
+        } else if self.config.launch_command.is_some() {
             if let Err(err) = self
                 .helper_request(&HelperRequest::Destroy {
                     sandbox_id: sandbox_id.0.to_string(),
@@ -532,6 +858,153 @@ impl SandboxBackend for AppleVzBackend {
             })
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
     }
+}
+
+fn resolve_direct_container_bin(launch_command: Option<&Vec<String>>) -> Option<String> {
+    let command = launch_command?;
+    if command.len() < 2 || command[1] != "apple-helper" {
+        return None;
+    }
+    extract_container_bin_from_helper_args(command).or_else(|| Some("container".to_string()))
+}
+
+fn extract_container_bin_from_helper_args(args: &[String]) -> Option<String> {
+    let mut idx = 0usize;
+    while idx < args.len() {
+        if args[idx] == "--container-bin" {
+            return args.get(idx + 1).cloned();
+        }
+        idx += 1;
+    }
+    None
+}
+
+async fn run_container_command(
+    container_bin: &str,
+    args: Vec<String>,
+    stdin_payload: Option<Vec<u8>>,
+    timeout_secs: u64,
+) -> Result<CommandResult> {
+    let mut cmd = Command::new(container_bin);
+    cmd.args(&args);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if stdin_payload.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        HyperboxError::ExecutionFailed(format!("spawn `{container_bin}` with args {:?}: {e}", args))
+    })?;
+
+    if let Some(payload) = stdin_payload {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            HyperboxError::ExecutionFailed("spawned process missing stdin".to_string())
+        })?;
+        stdin
+            .write_all(&payload)
+            .await
+            .map_err(|e| HyperboxError::ExecutionFailed(format!("write stdin payload: {e}")))?;
+        stdin.shutdown().await.map_err(|e| {
+            HyperboxError::ExecutionFailed(format!("close stdin payload pipe: {e}"))
+        })?;
+    }
+
+    let mut child_stdout = child.stdout.take().ok_or_else(|| {
+        HyperboxError::ExecutionFailed("spawned process missing stdout".to_string())
+    })?;
+    let mut child_stderr = child.stderr.take().ok_or_else(|| {
+        HyperboxError::ExecutionFailed("spawned process missing stderr".to_string())
+    })?;
+
+    let stdout_task = tokio::spawn(async move {
+        let mut data = Vec::new();
+        child_stdout
+            .read_to_end(&mut data)
+            .await
+            .map(|_| data)
+            .map_err(|e| HyperboxError::ExecutionFailed(format!("read stdout: {e}")))
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut data = Vec::new();
+        child_stderr
+            .read_to_end(&mut data)
+            .await
+            .map(|_| data)
+            .map_err(|e| HyperboxError::ExecutionFailed(format!("read stderr: {e}")))
+    });
+
+    let started_at = Instant::now();
+    let status = match timeout(Duration::from_secs(timeout_secs.max(1)), child.wait()).await {
+        Ok(result) => {
+            result.map_err(|e| HyperboxError::ExecutionFailed(format!("wait for command: {e}")))?
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "command timed out after {timeout_secs}s"
+            )));
+        }
+    };
+
+    let stdout = stdout_task
+        .await
+        .map_err(|e| HyperboxError::ExecutionFailed(format!("join stdout task: {e}")))??;
+    let stderr = stderr_task
+        .await
+        .map_err(|e| HyperboxError::ExecutionFailed(format!("join stderr task: {e}")))??;
+
+    Ok(CommandResult {
+        exit_code: status.code().unwrap_or(1),
+        stdout,
+        stderr,
+        duration_ms: started_at.elapsed().as_millis() as u64,
+    })
+}
+
+fn normalize_relative_path(raw: &str) -> Result<PathBuf> {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(HyperboxError::ExecutionFailed(
+            "absolute paths are not allowed".to_string(),
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                return Err(HyperboxError::ExecutionFailed(
+                    "path traversal is not allowed".to_string(),
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(HyperboxError::ExecutionFailed("invalid path".to_string()));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(HyperboxError::ExecutionFailed(
+            "path cannot be empty".to_string(),
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn path_in_container(relative: &Path) -> String {
+    Path::new(WORKDIR_IN_CONTAINER)
+        .join(relative)
+        .to_string_lossy()
+        .to_string()
 }
 
 #[cfg(test)]
