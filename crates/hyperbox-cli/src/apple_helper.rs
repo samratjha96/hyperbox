@@ -44,6 +44,13 @@ enum RuntimeKind {
     Virtualization,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelperNetworkMode {
+    None,
+    Full,
+    Allowlist(Vec<String>),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum HelperRequest {
@@ -52,6 +59,8 @@ enum HelperRequest {
         template: String,
         workspace_dir: Option<String>,
         runtime: String,
+        network_mode: Option<String>,
+        network_allowlist: Option<Vec<String>>,
         memory_mb: Option<u32>,
         vcpu_count: Option<u32>,
     },
@@ -151,6 +160,8 @@ impl AppleHelper {
                 template,
                 workspace_dir,
                 runtime,
+                network_mode,
+                network_allowlist,
                 memory_mb,
                 vcpu_count,
             } => {
@@ -159,6 +170,8 @@ impl AppleHelper {
                     template,
                     workspace_dir,
                     runtime,
+                    network_mode,
+                    network_allowlist,
                     memory_mb,
                     vcpu_count,
                 )
@@ -192,6 +205,8 @@ impl AppleHelper {
         template: String,
         workspace_dir: Option<String>,
         runtime: String,
+        network_mode: Option<String>,
+        network_allowlist: Option<Vec<String>>,
         memory_mb: Option<u32>,
         vcpu_count: Option<u32>,
     ) -> anyhow::Result<HelperResponse> {
@@ -203,6 +218,15 @@ impl AppleHelper {
             bail!(
                 "runtime `{}` is not implemented by this helper; use runtime=containerization",
                 runtime.as_str()
+            );
+        }
+        let network = HelperNetworkMode::parse(
+            network_mode.as_deref().unwrap_or("none"),
+            network_allowlist.unwrap_or_default(),
+        )?;
+        if matches!(network, HelperNetworkMode::Allowlist(_)) {
+            bail!(
+                "allowlist mode is not implemented by this helper; use network=none or network=full"
             );
         }
 
@@ -240,6 +264,7 @@ impl AppleHelper {
             &container_name,
             &template,
             &workspace_host,
+            &network,
             memory_mb,
             vcpu_count,
         )
@@ -274,13 +299,14 @@ impl AppleHelper {
         container_name: &str,
         template: &str,
         workspace_host: &Path,
+        network: &HelperNetworkMode,
         memory_mb: Option<u32>,
         vcpu_count: Option<u32>,
     ) -> anyhow::Result<()> {
         let cpus = vcpu_count.unwrap_or(1).max(1);
         let memory_mb = memory_mb.unwrap_or(512).max(1);
         let mount = format!("{}:{}", workspace_host.display(), WORKDIR_IN_CONTAINER);
-        let args = vec![
+        let mut args = vec![
             "run".to_string(),
             "--detach".to_string(),
             "--progress".to_string(),
@@ -291,16 +317,17 @@ impl AppleHelper {
             cpus.to_string(),
             "--memory".to_string(),
             format!("{memory_mb}M"),
-            "--network".to_string(),
-            "none".to_string(),
             "--workdir".to_string(),
             WORKDIR_IN_CONTAINER.to_string(),
             "--volume".to_string(),
             mount,
+        ];
+        args.extend(network.container_args()?);
+        args.extend([
             template.to_string(),
             "sleep".to_string(),
             "infinity".to_string(),
-        ];
+        ]);
 
         let result = self
             .run_container_command(args, None, DEFAULT_IO_TIMEOUT_SECS)
@@ -614,6 +641,27 @@ impl RuntimeKind {
     }
 }
 
+impl HelperNetworkMode {
+    fn parse(raw_mode: &str, allowlist: Vec<String>) -> anyhow::Result<Self> {
+        match raw_mode.to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "full" => Ok(Self::Full),
+            "allowlist" => Ok(Self::Allowlist(allowlist)),
+            other => bail!("unknown network mode `{other}`"),
+        }
+    }
+
+    fn container_args(&self) -> anyhow::Result<Vec<String>> {
+        match self {
+            Self::None => Ok(vec!["--network".to_string(), "none".to_string()]),
+            Self::Full => Ok(vec![]),
+            Self::Allowlist(_) => bail!(
+                "allowlist mode is not implemented by this helper; use network=none or network=full"
+            ),
+        }
+    }
+}
+
 fn sanitize_sandbox_id(raw: &str) -> anyhow::Result<String> {
     if raw.is_empty() {
         bail!("sandbox_id is required");
@@ -660,7 +708,7 @@ fn path_in_container(relative: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeKind, normalize_relative_path, sanitize_sandbox_id};
+    use super::{HelperNetworkMode, RuntimeKind, normalize_relative_path, sanitize_sandbox_id};
 
     #[test]
     fn runtime_parser_accepts_supported_values() {
@@ -703,5 +751,25 @@ mod tests {
     fn sandbox_id_validation_accepts_safe_values() {
         let value = sanitize_sandbox_id("abc-123_DEF").expect("sanitize sandbox id");
         assert_eq!(value, "abc-123_DEF");
+    }
+
+    #[test]
+    fn helper_network_parser_accepts_none_and_full() {
+        assert_eq!(
+            HelperNetworkMode::parse("none", vec![]).expect("none mode"),
+            HelperNetworkMode::None
+        );
+        assert_eq!(
+            HelperNetworkMode::parse("full", vec![]).expect("full mode"),
+            HelperNetworkMode::Full
+        );
+    }
+
+    #[test]
+    fn helper_network_parser_preserves_allowlist_mode() {
+        let mode = HelperNetworkMode::parse("allowlist", vec!["pypi.org".to_string()])
+            .expect("allowlist mode");
+        assert!(matches!(mode, HelperNetworkMode::Allowlist(_)));
+        assert!(mode.container_args().is_err());
     }
 }

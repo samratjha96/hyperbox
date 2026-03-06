@@ -69,6 +69,8 @@ enum HelperRequest {
         template: String,
         workspace_dir: Option<String>,
         runtime: String,
+        network_mode: String,
+        network_allowlist: Vec<String>,
         memory_mb: Option<u32>,
         vcpu_count: Option<u32>,
     },
@@ -295,6 +297,7 @@ impl AppleVzBackend {
         let cpus = config.vcpu_count.max(1);
         let memory_mb = config.memory_mb.max(1);
         let mount = format!("{}:{WORKDIR_IN_CONTAINER}", workspace_host.display());
+        let network_args = container_network_args(&config.network)?;
         let args = vec![
             "run".to_string(),
             "--detach".to_string(),
@@ -306,16 +309,18 @@ impl AppleVzBackend {
             cpus.to_string(),
             "--memory".to_string(),
             format!("{memory_mb}M"),
-            "--network".to_string(),
-            "none".to_string(),
             "--workdir".to_string(),
             WORKDIR_IN_CONTAINER.to_string(),
             "--volume".to_string(),
             mount,
+        ];
+        let mut args = args;
+        args.extend(network_args);
+        args.extend([
             config.template.clone(),
             "sleep".to_string(),
             "infinity".to_string(),
-        ];
+        ]);
         let result =
             run_container_command(container_bin, args, None, DEFAULT_IO_TIMEOUT_SECS).await?;
         if result.exit_code != 0 {
@@ -499,12 +504,7 @@ impl AppleVzBackend {
 impl SandboxBackend for AppleVzBackend {
     async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
         let create_started = std::time::Instant::now();
-        if !matches!(config.network, NetworkMode::None) {
-            return Err(HyperboxError::InvalidConfig(
-                "apple backend network policy enforcement is not implemented yet; use network=none"
-                    .to_string(),
-            ));
-        }
+        ensure_supported_apple_network_mode(&config.network)?;
         if self.config.launch_command.is_none() {
             return Err(HyperboxError::InvalidConfig(
                 "apple backend requires HYPERBOX_APPLE_HELPER to be configured".to_string(),
@@ -549,12 +549,15 @@ impl SandboxBackend for AppleVzBackend {
             Some(direct)
         } else if self.config.launch_command.is_some() {
             let helper_create_started = std::time::Instant::now();
+            let (network_mode, network_allowlist) = helper_network_fields(&config.network);
             let response = self
                 .helper_request(&HelperRequest::Create {
                     sandbox_id: id.0.to_string(),
                     template: config.template.clone(),
                     workspace_dir: config.workspace_dir.clone(),
                     runtime: self.runtime_name().to_string(),
+                    network_mode,
+                    network_allowlist,
                     memory_mb: Some(config.memory_mb),
                     vcpu_count: Some(config.vcpu_count as u32),
                 })
@@ -1007,10 +1010,42 @@ fn path_in_container(relative: &Path) -> String {
         .to_string()
 }
 
+fn ensure_supported_apple_network_mode(network: &NetworkMode) -> Result<()> {
+    if matches!(network, NetworkMode::Allowlist(_)) {
+        return Err(HyperboxError::InvalidConfig(
+            "apple backend does not enforce allowlist yet; use network=none or network=full"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn helper_network_fields(network: &NetworkMode) -> (String, Vec<String>) {
+    match network {
+        NetworkMode::None => ("none".to_string(), vec![]),
+        NetworkMode::Full => ("full".to_string(), vec![]),
+        NetworkMode::Allowlist(domains) => ("allowlist".to_string(), domains.clone()),
+    }
+}
+
+fn container_network_args(network: &NetworkMode) -> Result<Vec<String>> {
+    match network {
+        NetworkMode::None => Ok(vec!["--network".to_string(), "none".to_string()]),
+        NetworkMode::Full => Ok(vec![]),
+        NetworkMode::Allowlist(_) => Err(HyperboxError::InvalidConfig(
+            "apple backend does not enforce allowlist yet; use network=none or network=full"
+                .to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppleBackendConfig, AppleRuntimeKind, AppleVzBackend};
-    use hyperbox_core::{HyperboxError, SandboxBackend, SandboxConfig};
+    use super::{
+        AppleBackendConfig, AppleRuntimeKind, AppleVzBackend, container_network_args,
+        ensure_supported_apple_network_mode,
+    };
+    use hyperbox_core::{HyperboxError, NetworkMode, SandboxBackend, SandboxConfig};
 
     #[tokio::test]
     async fn create_requires_helper_command() {
@@ -1029,5 +1064,31 @@ mod tests {
             err.to_string().contains("HYPERBOX_APPLE_HELPER"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn apple_network_modes_allow_none_and_full() {
+        assert!(ensure_supported_apple_network_mode(&NetworkMode::None).is_ok());
+        assert!(ensure_supported_apple_network_mode(&NetworkMode::Full).is_ok());
+    }
+
+    #[test]
+    fn apple_network_mode_rejects_allowlist_without_enforcement() {
+        let err = ensure_supported_apple_network_mode(&NetworkMode::Allowlist(vec![
+            "pypi.org".to_string(),
+        ]))
+        .expect_err("allowlist should fail without enforcement");
+        assert!(
+            err.to_string().contains("does not enforce allowlist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn container_network_args_follow_mode() {
+        let none_args = container_network_args(&NetworkMode::None).expect("none args");
+        assert_eq!(none_args, vec!["--network".to_string(), "none".to_string()]);
+        let full_args = container_network_args(&NetworkMode::Full).expect("full args");
+        assert!(full_args.is_empty());
     }
 }
