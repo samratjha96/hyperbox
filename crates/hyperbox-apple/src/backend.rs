@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
-    SandboxInfo, SandboxLease, SandboxState,
+    SandboxInfo, SandboxLease, SandboxState, SnapshotId,
 };
 use hyperbox_proto::hyperbox::v1::hyperbox_agent_client::HyperboxAgentClient;
 
@@ -28,6 +28,7 @@ use crate::detect_macos_capabilities;
 const WORKDIR_IN_CONTAINER: &str = "/workspace";
 const DEFAULT_IO_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DESTROY_TIMEOUT_SECS: u64 = 30;
+const SNAPSHOT_ARCHIVE_DIR_REL: &str = ".hyperbox/snapshots";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppleRuntimeKind {
@@ -327,7 +328,7 @@ impl AppleVzBackend {
             return Err(HyperboxError::ExecutionFailed(format!(
                 "container run failed (exit={}): {}",
                 result.exit_code,
-                String::from_utf8_lossy(&result.stderr)
+                stderr_summary(&result.stderr)
             )));
         }
 
@@ -367,6 +368,7 @@ impl AppleVzBackend {
         &self,
         direct: &DirectContainerSandbox,
         path: &str,
+        timeout_secs: u64,
     ) -> Result<FilePayload> {
         let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
             HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
@@ -382,13 +384,12 @@ impl AppleVzBackend {
             "cat".to_string(),
             container_path,
         ];
-        let result =
-            run_container_command(container_bin, args, None, DEFAULT_IO_TIMEOUT_SECS).await?;
+        let result = run_container_command(container_bin, args, None, timeout_secs.max(1)).await?;
         if result.exit_code != 0 {
             return Err(HyperboxError::ExecutionFailed(format!(
                 "read failed (exit={}): {}",
                 result.exit_code,
-                String::from_utf8_lossy(&result.stderr)
+                stderr_summary(&result.stderr)
             )));
         }
         Ok(FilePayload {
@@ -401,12 +402,21 @@ impl AppleVzBackend {
         &self,
         direct: &DirectContainerSandbox,
         payload: FilePayload,
+        timeout_secs: u64,
     ) -> Result<()> {
         let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
             HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
         })?;
         let relative = normalize_relative_path(payload.path.as_str())?;
         let container_path = path_in_container(&relative);
+        let payload_len = payload.bytes.len();
+        debug!(
+            container = %direct.container_name,
+            path = %payload.path,
+            bytes = payload_len,
+            timeout_secs,
+            "apple backend direct file write"
+        );
 
         if let Some(parent) = relative.parent() {
             if !parent.as_os_str().is_empty() {
@@ -422,13 +432,13 @@ impl AppleVzBackend {
                     parent_in_container,
                 ];
                 let mkdir_result =
-                    run_container_command(container_bin, mkdir_args, None, DEFAULT_IO_TIMEOUT_SECS)
+                    run_container_command(container_bin, mkdir_args, None, timeout_secs.max(1))
                         .await?;
                 if mkdir_result.exit_code != 0 {
                     return Err(HyperboxError::ExecutionFailed(format!(
                         "create parent directory failed (exit={}): {}",
                         mkdir_result.exit_code,
-                        String::from_utf8_lossy(&mkdir_result.stderr)
+                        stderr_summary(&mkdir_result.stderr)
                     )));
                 }
             }
@@ -448,14 +458,14 @@ impl AppleVzBackend {
             container_bin,
             write_args,
             Some(payload.bytes),
-            DEFAULT_IO_TIMEOUT_SECS,
+            timeout_secs.max(1),
         )
         .await?;
         if write_result.exit_code != 0 {
             return Err(HyperboxError::ExecutionFailed(format!(
                 "write failed (exit={}): {}",
                 write_result.exit_code,
-                String::from_utf8_lossy(&write_result.stderr)
+                stderr_summary(&write_result.stderr)
             )));
         }
         Ok(())
@@ -478,7 +488,7 @@ impl AppleVzBackend {
                 return Err(HyperboxError::ExecutionFailed(format!(
                     "container delete failed (exit={}): {}",
                     result.exit_code,
-                    String::from_utf8_lossy(&result.stderr)
+                    stderr_summary(&result.stderr)
                 )));
             }
         }
@@ -714,7 +724,9 @@ impl SandboxBackend for AppleVzBackend {
         };
 
         if let Some(direct) = direct_container {
-            return self.read_file_direct(&direct, path).await;
+            return self
+                .read_file_direct(&direct, path, DEFAULT_IO_TIMEOUT_SECS)
+                .await;
         }
 
         if self.config.launch_command.is_some() {
@@ -774,7 +786,9 @@ impl SandboxBackend for AppleVzBackend {
         };
 
         if let Some(direct) = direct_container {
-            return self.write_file_direct(&direct, payload).await;
+            return self
+                .write_file_direct(&direct, payload, DEFAULT_IO_TIMEOUT_SECS)
+                .await;
         }
 
         if self.config.launch_command.is_some() {
@@ -812,6 +826,188 @@ impl SandboxBackend for AppleVzBackend {
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("write file via agent: {e}")))?;
         Ok(())
+    }
+
+    async fn create_snapshot(
+        &self,
+        sandbox_id: &SandboxId,
+        snapshot_id: &SnapshotId,
+        artifact_path: &Path,
+    ) -> Result<()> {
+        let rel_path = snapshot_archive_relpath(snapshot_id);
+        let abs_path = path_in_container(Path::new(&rel_path));
+        let direct_container = {
+            let sandboxes = self.sandboxes.lock().await;
+            sandboxes
+                .get(sandbox_id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?
+                .direct_container
+                .clone()
+        };
+
+        let create_outcome = self
+            .exec(
+                sandbox_id,
+                hyperbox_core::ExecRequest {
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        snapshot_create_command(&abs_path),
+                    ],
+                    timeout_secs: 1800,
+                },
+            )
+            .await?;
+        if create_outcome.exit_code != 0 {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "snapshot archive create failed (exit={}): {}",
+                create_outcome.exit_code,
+                truncate_error_output(&create_outcome.stderr)
+            )));
+        }
+        if let Some(parent) = artifact_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        if let Some(direct) = direct_container {
+            let host_archive_path = direct.workspace_host.join(&rel_path);
+            tokio::fs::copy(&host_archive_path, artifact_path).await?;
+            let _ = tokio::fs::remove_file(host_archive_path).await;
+        } else {
+            let bytes = self.read_file(sandbox_id, &rel_path).await?.bytes;
+            tokio::fs::write(artifact_path, &bytes).await?;
+
+            let _ = self
+                .exec(
+                    sandbox_id,
+                    hyperbox_core::ExecRequest {
+                        command: vec![
+                            "/bin/sh".to_string(),
+                            "-lc".to_string(),
+                            format!("rm -f {abs_path}"),
+                        ],
+                        timeout_secs: 30,
+                    },
+                )
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn restore_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+        artifact_path: &Path,
+        config: SandboxConfig,
+    ) -> Result<SandboxLease> {
+        if !artifact_path.exists() {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "snapshot artifact missing for {} at {}",
+                snapshot_id.0,
+                artifact_path.display()
+            )));
+        }
+        let lease = self.create(config).await?;
+
+        let rel_path = snapshot_archive_relpath(snapshot_id);
+        let abs_path = path_in_container(Path::new(&rel_path));
+        let direct_container = {
+            let sandboxes = self.sandboxes.lock().await;
+            sandboxes
+                .get(&lease.id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(lease.id.0.to_string()))?
+                .direct_container
+                .clone()
+        };
+        let write_result: Result<()> = if let Some(direct) = direct_container {
+            let host_archive_path = direct.workspace_host.join(&rel_path);
+            if let Some(parent) = host_archive_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            info!(
+                snapshot_id = %snapshot_id.0,
+                sandbox_id = %lease.id.0,
+                direct_mode = true,
+                artifact_path = %artifact_path.display(),
+                host_archive_path = %host_archive_path.display(),
+                "apple backend restoring snapshot archive into sandbox"
+            );
+            tokio::fs::copy(artifact_path, &host_archive_path).await?;
+            Ok(())
+        } else {
+            let bytes = tokio::fs::read(artifact_path).await?;
+            info!(
+                snapshot_id = %snapshot_id.0,
+                sandbox_id = %lease.id.0,
+                direct_mode = false,
+                payload_bytes = bytes.len(),
+                "apple backend restoring snapshot archive into sandbox"
+            );
+            self.write_file(
+                &lease.id,
+                FilePayload {
+                    path: rel_path.clone().into(),
+                    bytes,
+                },
+            )
+            .await
+        };
+        if let Err(err) = write_result {
+            let _ = self.destroy(&lease.id).await;
+            return Err(err);
+        }
+
+        let restore_outcome = self
+            .exec(
+                &lease.id,
+                hyperbox_core::ExecRequest {
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        snapshot_restore_command(&abs_path),
+                    ],
+                    timeout_secs: 1800,
+                },
+            )
+            .await;
+        match restore_outcome {
+            Ok(outcome) if outcome.exit_code == 0 => {
+                if let Some(direct) = {
+                    let sandboxes = self.sandboxes.lock().await;
+                    sandboxes
+                        .get(&lease.id)
+                        .and_then(|sandbox| sandbox.direct_container.clone())
+                } {
+                    let host_archive_path = direct.workspace_host.join(&rel_path);
+                    let _ = tokio::fs::remove_file(host_archive_path).await;
+                } else {
+                    let _ = self
+                        .exec(
+                            &lease.id,
+                            hyperbox_core::ExecRequest {
+                                command: vec![
+                                    "/bin/sh".to_string(),
+                                    "-lc".to_string(),
+                                    format!("rm -f {abs_path}"),
+                                ],
+                                timeout_secs: 30,
+                            },
+                        )
+                        .await;
+                }
+                Ok(lease)
+            }
+            Ok(outcome) => {
+                let _ = self.destroy(&lease.id).await;
+                Err(HyperboxError::ExecutionFailed(format!(
+                    "snapshot restore failed: {}",
+                    truncate_error_output(&outcome.stderr)
+                )))
+            }
+            Err(err) => {
+                let _ = self.destroy(&lease.id).await;
+                Err(err)
+            }
+        }
     }
 
     async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
@@ -880,6 +1076,41 @@ fn extract_container_bin_from_helper_args(args: &[String]) -> Option<String> {
         idx += 1;
     }
     None
+}
+
+fn snapshot_archive_relpath(snapshot_id: &SnapshotId) -> String {
+    format!("{SNAPSHOT_ARCHIVE_DIR_REL}/{}.tar.gz", snapshot_id.0)
+}
+
+fn snapshot_create_command(snapshot_archive_abs: &str) -> String {
+    format!(
+        "set -eu; mkdir -p /workspace/{dir}; set --; for d in bin boot etc home lib lib64 opt root sbin srv usr var; do [ -e \"/$d\" ] && set -- \"$@\" \"$d\"; done; [ \"$#\" -gt 0 ]; tar --ignore-failed-read -czf {archive} -C / \"$@\"",
+        dir = SNAPSHOT_ARCHIVE_DIR_REL,
+        archive = snapshot_archive_abs
+    )
+}
+
+fn snapshot_restore_command(snapshot_archive_abs: &str) -> String {
+    format!(
+        "tar --no-same-owner --no-same-permissions --no-overwrite-dir --touch -xzf {snapshot_archive_abs} -C /"
+    )
+}
+
+fn truncate_error_output(raw: &str) -> String {
+    const MAX_CHARS: usize = 1024;
+    if raw.chars().count() <= MAX_CHARS {
+        return raw.trim().to_string();
+    }
+    let mut out = String::with_capacity(MAX_CHARS + 32);
+    for ch in raw.chars().take(MAX_CHARS) {
+        out.push(ch);
+    }
+    out.push_str("... (truncated)");
+    out
+}
+
+fn stderr_summary(stderr: &[u8]) -> String {
+    truncate_error_output(&String::from_utf8_lossy(stderr))
 }
 
 async fn run_container_command(
