@@ -14,4 +14,4 @@ pub use local_backend::LocalBackend;
 pub use metrics::{MetricsCollector, MetricsSnapshot};
 pub use pool::{PoolStats, WarmPoolManager};
 pub use runtime::HyperboxServer;
-pub use snapshot_store::InMemorySnapshotStore;
+pub use snapshot_store::{InMemorySnapshotStore, SqliteSnapshotStore};

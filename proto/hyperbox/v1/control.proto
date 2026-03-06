@@ -11,6 +11,7 @@ message SandboxConfig {
   NetworkMode network_mode = 6;
   repeated string network_allowlist = 7;
   string workspace_dir = 8;
+  string affinity_name = 9;
 }
 
 message SandboxId {
@@ -126,6 +127,33 @@ message RestoreSnapshotResponse {
   SandboxInfo info = 1;
 }
 
+message SnapshotInfo {
+  string snapshot_id = 1;
+  string sandbox_id = 2;
+  string template = 3;
+  string created_at = 4;
+  string note = 5;
+  string affinity_name = 6;
+}
+
+message ListSnapshotsRequest {
+  string template = 1;
+}
+
+message ListSnapshotsResponse {
+  repeated SnapshotInfo snapshots = 1;
+}
+
+message ResolveAffinityRequest {
+  string name = 1;
+  bool restore_if_needed = 2;
+}
+
+message ResolveAffinityResponse {
+  SandboxInfo info = 1;
+  bool restored = 2;
+}
+
 message ShellOpenRequest {
   string sandbox_id = 1;
   repeated string command = 2;
@@ -169,6 +197,8 @@ service HyperboxControl {
   rpc GetServerInfo(ServerInfoRequest) returns (ServerInfoResponse);
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   rpc RestoreSnapshot(RestoreSnapshotRequest) returns (RestoreSnapshotResponse);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc ResolveAffinity(ResolveAffinityRequest) returns (ResolveAffinityResponse);
 }
 
 service HyperboxAgent {

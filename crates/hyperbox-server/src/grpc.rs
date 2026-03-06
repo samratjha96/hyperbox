@@ -58,6 +58,11 @@ fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
         };
 
     SandboxConfig {
+        affinity_name: if config.affinity_name.is_empty() {
+            None
+        } else {
+            Some(config.affinity_name)
+        },
         template: if config.template.is_empty() {
             SandboxConfig::default().template
         } else {
@@ -360,6 +365,67 @@ impl HyperboxControl for GrpcControlService {
 
         Ok(Response::new(pb::RestoreSnapshotResponse {
             info: Some(into_proto_info(info)),
+        }))
+    }
+
+    async fn list_snapshots(
+        &self,
+        request: Request<pb::ListSnapshotsRequest>,
+    ) -> Result<Response<pb::ListSnapshotsResponse>, Status> {
+        let peer = request.remote_addr();
+        let template = request.into_inner().template;
+        let template = if template.is_empty() {
+            SandboxConfig::default().template
+        } else {
+            template
+        };
+        debug!(peer = ?peer, template = %template, "grpc list_snapshots request");
+        let snapshots = self.runtime.list_snapshots(&template).await.map_err(|e| {
+            error!(peer = ?peer, template = %template, error = %e, "grpc list_snapshots failed");
+            Status::internal(e.to_string())
+        })?;
+
+        let snapshots = snapshots
+            .into_iter()
+            .map(|s| pb::SnapshotInfo {
+                snapshot_id: s.id.0.to_string(),
+                sandbox_id: s.sandbox_id.0.to_string(),
+                template: s.template,
+                created_at: s.created_at.to_rfc3339(),
+                note: s.note.unwrap_or_default(),
+                affinity_name: s.affinity_name.unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(Response::new(pb::ListSnapshotsResponse { snapshots }))
+    }
+
+    async fn resolve_affinity(
+        &self,
+        request: Request<pb::ResolveAffinityRequest>,
+    ) -> Result<Response<pb::ResolveAffinityResponse>, Status> {
+        let peer = request.remote_addr();
+        let req = request.into_inner();
+        if req.name.trim().is_empty() {
+            return Err(Status::invalid_argument("name must not be empty"));
+        }
+        info!(
+            peer = ?peer,
+            name = %req.name,
+            restore_if_needed = req.restore_if_needed,
+            "grpc resolve_affinity request"
+        );
+        let (info, restored) = self
+            .runtime
+            .resolve_affinity(&req.name, req.restore_if_needed)
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, name = %req.name, error = %e, "grpc resolve_affinity failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(pb::ResolveAffinityResponse {
+            info: Some(into_proto_info(info)),
+            restored,
         }))
     }
 }

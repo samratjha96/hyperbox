@@ -1,4 +1,6 @@
-use hyperbox_core::{ExecOutcome, ExecRequest, NetworkMode, SandboxConfig, SandboxInfo};
+use hyperbox_core::{
+    ExecOutcome, ExecRequest, NetworkMode, SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata,
+};
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_client::HyperboxControlClient};
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,7 @@ impl GrpcControlClient {
     pub async fn create_sandbox(&mut self, config: SandboxConfig) -> anyhow::Result<SandboxInfo> {
         let request = pb::CreateSandboxRequest {
             config: Some(pb::SandboxConfig {
+                affinity_name: config.affinity_name.unwrap_or_default(),
                 template: config.template,
                 memory_mb: config.memory_mb,
                 vcpu_count: config.vcpu_count as u32,
@@ -189,5 +192,128 @@ impl GrpcControlClient {
             .await?
             .into_inner();
         Ok(response.bytes)
+    }
+
+    pub async fn create_snapshot(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+        note: Option<String>,
+    ) -> anyhow::Result<(SnapshotId, String)> {
+        let response = self
+            .inner
+            .create_snapshot(pb::CreateSnapshotRequest {
+                sandbox_id: sandbox_id.0.to_string(),
+                template: "".to_string(),
+                note: note.unwrap_or_default(),
+            })
+            .await?
+            .into_inner();
+        Ok((
+            SnapshotId(uuid::Uuid::parse_str(&response.snapshot_id)?),
+            response.created_at,
+        ))
+    }
+
+    pub async fn restore_snapshot(
+        &mut self,
+        snapshot_id: &SnapshotId,
+    ) -> anyhow::Result<SandboxInfo> {
+        let info = self
+            .inner
+            .restore_snapshot(pb::RestoreSnapshotRequest {
+                snapshot_id: snapshot_id.0.to_string(),
+            })
+            .await?
+            .into_inner()
+            .info
+            .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?;
+
+        Ok(SandboxInfo {
+            id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
+            template: info.template,
+            state: match info.state.as_str() {
+                "Provisioning" => hyperbox_core::SandboxState::Provisioning,
+                "Busy" => hyperbox_core::SandboxState::Busy,
+                "Stopped" => hyperbox_core::SandboxState::Stopped,
+                "Failed" => hyperbox_core::SandboxState::Failed,
+                _ => hyperbox_core::SandboxState::Ready,
+            },
+            created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+                .with_timezone(&chrono::Utc),
+        })
+    }
+
+    pub async fn list_snapshots(
+        &mut self,
+        template: &str,
+    ) -> anyhow::Result<Vec<SnapshotMetadata>> {
+        let response = self
+            .inner
+            .list_snapshots(pb::ListSnapshotsRequest {
+                template: template.to_string(),
+            })
+            .await?
+            .into_inner();
+        response
+            .snapshots
+            .into_iter()
+            .map(|s| {
+                Ok(SnapshotMetadata {
+                    id: SnapshotId(uuid::Uuid::parse_str(&s.snapshot_id)?),
+                    sandbox_id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&s.sandbox_id)?),
+                    affinity_name: if s.affinity_name.is_empty() {
+                        None
+                    } else {
+                        Some(s.affinity_name)
+                    },
+                    template: s.template.clone(),
+                    config: SandboxConfig {
+                        template: s.template,
+                        ..SandboxConfig::default()
+                    },
+                    created_at: chrono::DateTime::parse_from_rfc3339(&s.created_at)?
+                        .with_timezone(&chrono::Utc),
+                    note: if s.note.is_empty() {
+                        None
+                    } else {
+                        Some(s.note)
+                    },
+                })
+            })
+            .collect()
+    }
+
+    pub async fn resolve_affinity(
+        &mut self,
+        name: &str,
+        restore_if_needed: bool,
+    ) -> anyhow::Result<(SandboxInfo, bool)> {
+        let response = self
+            .inner
+            .resolve_affinity(pb::ResolveAffinityRequest {
+                name: name.to_string(),
+                restore_if_needed,
+            })
+            .await?
+            .into_inner();
+        let info = response
+            .info
+            .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?;
+        Ok((
+            SandboxInfo {
+                id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
+                template: info.template,
+                state: match info.state.as_str() {
+                    "Provisioning" => hyperbox_core::SandboxState::Provisioning,
+                    "Busy" => hyperbox_core::SandboxState::Busy,
+                    "Stopped" => hyperbox_core::SandboxState::Stopped,
+                    "Failed" => hyperbox_core::SandboxState::Failed,
+                    _ => hyperbox_core::SandboxState::Ready,
+                },
+                created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+                    .with_timezone(&chrono::Utc),
+            },
+            response.restored,
+        ))
     }
 }

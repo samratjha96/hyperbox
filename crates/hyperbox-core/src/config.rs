@@ -11,6 +11,7 @@ pub enum NetworkMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxConfig {
+    pub affinity_name: Option<String>,
     pub template: String,
     pub memory_mb: u32,
     pub vcpu_count: u8,
@@ -23,6 +24,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            affinity_name: None,
             template: "python:3.12".to_string(),
             memory_mb: 512,
             vcpu_count: 1,

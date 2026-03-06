@@ -4,8 +4,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, FilePayload, Result, SandboxBackend, SandboxConfig, SandboxId,
-    SandboxInfo, SnapshotId, SnapshotMetadata, SnapshotStore, TemplateRegistry,
+    ExecOutcome, ExecRequest, FilePayload, HyperboxError, Result, SandboxBackend, SandboxConfig,
+    SandboxId, SandboxInfo, SnapshotId, SnapshotMetadata, SnapshotStore, TemplateRegistry,
 };
 
 use crate::metrics::{MetricsCollector, MetricsSnapshot};
@@ -21,7 +21,20 @@ pub struct HyperboxServer {
 
 impl HyperboxServer {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
-        Self::new_with_snapshots(backend, Arc::new(crate::InMemorySnapshotStore::default()))
+        if cfg!(test) {
+            return Self::new_with_snapshots(
+                backend,
+                Arc::new(crate::InMemorySnapshotStore::default()),
+            );
+        }
+        let snapshots: Arc<dyn SnapshotStore> = match crate::SqliteSnapshotStore::open_default() {
+            Ok(store) => Arc::new(store),
+            Err(err) => {
+                warn!(error = %err, "failed to open sqlite snapshot store, falling back to in-memory");
+                Arc::new(crate::InMemorySnapshotStore::default())
+            }
+        };
+        Self::new_with_snapshots(backend, snapshots)
     }
 
     pub fn new_with_snapshots(
@@ -54,6 +67,9 @@ impl HyperboxServer {
             "runtime create_sandbox"
         );
         let lease = self.backend.create(config.clone()).await?;
+        if let Some(name) = config.affinity_name.as_deref() {
+            self.snapshots.bind_sandbox(name, &lease.id).await?;
+        }
         self.sandboxes.lock().await.insert(lease.id.clone(), config);
         self.metrics.inc_create();
         info!(sandbox_id = %lease.id.0, template = %lease.info.template, "runtime sandbox created");
@@ -103,6 +119,7 @@ impl HyperboxServer {
         info!(sandbox_id = %sandbox_id.0, "runtime destroy_sandbox");
         self.backend.destroy(sandbox_id).await?;
         self.sandboxes.lock().await.remove(sandbox_id);
+        self.snapshots.clear_sandbox_binding(sandbox_id).await?;
         self.metrics.inc_destroy();
         info!(sandbox_id = %sandbox_id.0, "runtime sandbox destroyed");
         Ok(())
@@ -131,13 +148,17 @@ impl HyperboxServer {
             .ok_or_else(|| {
                 hyperbox_core::HyperboxError::SandboxNotFound(sandbox_id.0.to_string())
             })?;
-        self.snapshots
-            .create_snapshot(sandbox_id, &sandbox.template, note)
-            .await
-            .map(|snapshot| {
-                info!(sandbox_id = %sandbox_id.0, snapshot_id = %snapshot.id.0, "runtime snapshot created");
-                snapshot
-            })
+        let snapshot = self
+            .snapshots
+            .create_snapshot(sandbox_id, &sandbox, note)
+            .await?;
+        if let Some(name) = sandbox.affinity_name.as_deref() {
+            self.snapshots
+                .set_affinity_snapshot(name, &snapshot.id)
+                .await?;
+        }
+        info!(sandbox_id = %sandbox_id.0, snapshot_id = %snapshot.id.0, "runtime snapshot created");
+        Ok(snapshot)
     }
 
     pub async fn restore_snapshot(&self, snapshot_id: &SnapshotId) -> Result<SandboxInfo> {
@@ -150,10 +171,7 @@ impl HyperboxServer {
                 hyperbox_core::HyperboxError::ExecutionFailed("snapshot not found".to_string())
             })?;
 
-        self.create_sandbox(SandboxConfig {
-            template: snapshot.template,
-            ..SandboxConfig::default()
-        })
+        self.create_sandbox(snapshot.config.clone())
         .await
         .map(|info| {
             warn!(snapshot_id = %snapshot_id.0, sandbox_id = %info.id.0, "runtime restore_snapshot created replacement sandbox");
@@ -163,6 +181,39 @@ impl HyperboxServer {
 
     pub async fn list_snapshots(&self, template: &str) -> Result<Vec<SnapshotMetadata>> {
         self.snapshots.list_for_template(template).await
+    }
+
+    pub async fn resolve_affinity(
+        &self,
+        name: &str,
+        restore_if_needed: bool,
+    ) -> Result<(SandboxInfo, bool)> {
+        let affinity =
+            self.snapshots.get_affinity(name).await?.ok_or_else(|| {
+                HyperboxError::ExecutionFailed(format!("affinity not found: {name}"))
+            })?;
+
+        if let Some(sandbox_id) = affinity.sandbox_id {
+            match self.inspect(&sandbox_id).await {
+                Ok(info) => return Ok((info, false)),
+                Err(err) => {
+                    warn!(name = %name, sandbox_id = %sandbox_id.0, error = %err, "affinity sandbox missing, clearing stale binding");
+                    self.snapshots.clear_sandbox_binding(&sandbox_id).await?;
+                }
+            }
+        }
+
+        if !restore_if_needed {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "affinity `{name}` has no active sandbox"
+            )));
+        }
+
+        let snapshot_id = affinity.snapshot_id.ok_or_else(|| {
+            HyperboxError::ExecutionFailed(format!("affinity `{name}` has no snapshot to restore"))
+        })?;
+        let info = self.restore_snapshot(&snapshot_id).await?;
+        Ok((info, true))
     }
 }
 
