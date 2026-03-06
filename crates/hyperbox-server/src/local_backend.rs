@@ -1,15 +1,18 @@
 use std::{
     collections::HashMap,
+    fs::File,
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 
 use chrono::Utc;
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
-    SandboxInfo, SandboxLease, SandboxState,
+    SandboxInfo, SandboxLease, SandboxState, SnapshotId,
 };
+use tar::{Archive, Builder};
 use tokio::{
     fs,
     process::Command,
@@ -64,6 +67,36 @@ impl LocalBackend {
         }
 
         Ok(candidate)
+    }
+
+    async fn archive_workdir(source: PathBuf, artifact_path: PathBuf) -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = File::create(&artifact_path)?;
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut builder = Builder::new(encoder);
+            builder.append_dir_all(".", &source)?;
+            let encoder = builder.into_inner()?;
+            encoder.finish()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            HyperboxError::ExecutionFailed(format!("snapshot archive task join failed: {e}"))
+        })?
+    }
+
+    async fn unpack_workdir(artifact_path: PathBuf, destination: PathBuf) -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = File::open(&artifact_path)?;
+            let decoder = GzDecoder::new(file);
+            let mut archive = Archive::new(decoder);
+            archive.unpack(&destination)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            HyperboxError::ExecutionFailed(format!("snapshot restore task join failed: {e}"))
+        })?
     }
 }
 
@@ -252,11 +285,82 @@ impl SandboxBackend for LocalBackend {
             .map(|record| record.info.clone())
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
     }
+
+    async fn create_snapshot(
+        &self,
+        sandbox_id: &SandboxId,
+        _snapshot_id: &SnapshotId,
+        artifact_path: &Path,
+    ) -> Result<()> {
+        let record = self
+            .state
+            .lock()
+            .await
+            .get(sandbox_id)
+            .cloned()
+            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+
+        if let Some(parent) = artifact_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        if artifact_path.exists() {
+            fs::remove_file(artifact_path).await?;
+        }
+
+        Self::archive_workdir(record.working_dir, artifact_path.to_path_buf()).await?;
+        Ok(())
+    }
+
+    async fn restore_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+        artifact_path: &Path,
+        config: SandboxConfig,
+    ) -> Result<SandboxLease> {
+        if !artifact_path.exists() {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "snapshot artifact missing for {} at {}",
+                snapshot_id.0,
+                artifact_path.display()
+            )));
+        }
+
+        let lease = self.create(config).await?;
+        let record = self
+            .state
+            .lock()
+            .await
+            .get(&lease.id)
+            .cloned()
+            .ok_or_else(|| HyperboxError::SandboxNotFound(lease.id.0.to_string()))?;
+
+        if !record.managed_working_dir {
+            let _ = self.destroy(&lease.id).await;
+            return Err(HyperboxError::ExecutionFailed(
+                "local snapshot restore into shared workspace_dir is not supported".to_string(),
+            ));
+        }
+        if record.working_dir.exists() {
+            fs::remove_dir_all(&record.working_dir).await?;
+        }
+        fs::create_dir_all(&record.working_dir).await?;
+
+        if let Err(err) =
+            Self::unpack_workdir(artifact_path.to_path_buf(), record.working_dir.clone()).await
+        {
+            let _ = self.destroy(&lease.id).await;
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "local snapshot restore failed for {}: {err}",
+                snapshot_id.0
+            )));
+        }
+        Ok(lease)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxState};
+    use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxState, SnapshotId};
 
     use super::*;
 
@@ -391,5 +495,72 @@ mod tests {
         assert!(write_err.to_string().contains("must be relative"));
 
         backend.destroy(&lease.id).await.expect("destroy sandbox");
+    }
+
+    #[tokio::test]
+    async fn local_backend_snapshot_roundtrip_restores_filesystem() {
+        let root =
+            std::env::temp_dir().join(format!("hyperbox-local-snap-{}", uuid::Uuid::new_v4()));
+        let backend = LocalBackend::new(Some(root.clone()));
+        let config = SandboxConfig::default();
+        let lease = backend
+            .create(config.clone())
+            .await
+            .expect("create sandbox");
+
+        backend
+            .exec(
+                &lease.id,
+                ExecRequest {
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        "printf before > marker.txt".to_string(),
+                    ],
+                    timeout_secs: 10,
+                },
+            )
+            .await
+            .expect("write marker");
+
+        let snapshot_id = SnapshotId::new();
+        let artifact = root.join("artifact.tar.gz");
+        backend
+            .create_snapshot(&lease.id, &snapshot_id, &artifact)
+            .await
+            .expect("create snapshot artifact");
+
+        backend
+            .destroy(&lease.id)
+            .await
+            .expect("destroy original sandbox");
+
+        let restored = backend
+            .restore_snapshot(&snapshot_id, &artifact, config)
+            .await
+            .expect("restore snapshot");
+
+        let out = backend
+            .exec(
+                &restored.id,
+                ExecRequest {
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        "cat marker.txt".to_string(),
+                    ],
+                    timeout_secs: 10,
+                },
+            )
+            .await
+            .expect("cat marker");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.stdout.trim(), "before");
+
+        backend
+            .destroy(&restored.id)
+            .await
+            .expect("destroy restored sandbox");
+        let _ = fs::remove_dir_all(&root).await;
     }
 }

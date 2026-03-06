@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -152,6 +152,10 @@ impl HyperboxServer {
             .snapshots
             .create_snapshot(sandbox_id, &sandbox, note)
             .await?;
+        let artifact_path = snapshot_artifact_path(&snapshot.id)?;
+        self.backend
+            .create_snapshot(sandbox_id, &snapshot.id, &artifact_path)
+            .await?;
         if let Some(name) = sandbox.affinity_name.as_deref() {
             self.snapshots
                 .set_affinity_snapshot(name, &snapshot.id)
@@ -171,10 +175,26 @@ impl HyperboxServer {
                 hyperbox_core::HyperboxError::ExecutionFailed("snapshot not found".to_string())
             })?;
 
-        self.create_sandbox(snapshot.config.clone())
-        .await
-        .map(|info| {
-            warn!(snapshot_id = %snapshot_id.0, sandbox_id = %info.id.0, "runtime restore_snapshot created replacement sandbox");
+        let artifact_path = snapshot_artifact_path(snapshot_id)?;
+        if artifact_path.exists() {
+            let lease = self
+                .backend
+                .restore_snapshot(snapshot_id, &artifact_path, snapshot.config.clone())
+                .await?;
+            if let Some(name) = snapshot.config.affinity_name.as_deref() {
+                self.snapshots.bind_sandbox(name, &lease.id).await?;
+            }
+            self.sandboxes
+                .lock()
+                .await
+                .insert(lease.id.clone(), snapshot.config.clone());
+            self.metrics.inc_create();
+            warn!(snapshot_id = %snapshot_id.0, sandbox_id = %lease.id.0, "runtime restore_snapshot restored sandbox from artifact");
+            return Ok(lease.info);
+        }
+
+        self.create_sandbox(snapshot.config.clone()).await.map(|info| {
+            warn!(snapshot_id = %snapshot_id.0, sandbox_id = %info.id.0, "runtime restore_snapshot created replacement sandbox (no artifact)");
             info
         })
     }
@@ -215,6 +235,18 @@ impl HyperboxServer {
         let info = self.restore_snapshot(&snapshot_id).await?;
         Ok((info, true))
     }
+}
+
+fn snapshot_artifact_path(snapshot_id: &SnapshotId) -> Result<PathBuf> {
+    let root = if let Ok(value) = std::env::var("HYPERBOX_SNAPSHOT_ROOT") {
+        PathBuf::from(value)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".hyperbox/snapshots")
+    } else {
+        std::env::temp_dir().join("hyperbox/snapshots")
+    };
+    std::fs::create_dir_all(&root)?;
+    Ok(root.join(format!("{}.tar.gz", snapshot_id.0)))
 }
 
 #[cfg(test)]
