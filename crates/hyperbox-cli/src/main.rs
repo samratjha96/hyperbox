@@ -17,7 +17,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId};
+use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
 use hyperbox_proto::hyperbox::v1::{
     self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
 };
@@ -50,6 +50,8 @@ enum Command {
     Run {
         #[arg(long)]
         sandbox_id: Option<String>,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        name: Option<String>,
         #[arg(long, default_value = "python:3.12")]
         template: String,
         #[arg(long)]
@@ -70,6 +72,8 @@ enum Command {
         json: bool,
     },
     Create {
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long, default_value = "python:3.12")]
         template: String,
         #[arg(long, value_enum, default_value_t = NetworkArg::None)]
@@ -88,8 +92,10 @@ enum Command {
         json: bool,
     },
     Destroy {
-        #[arg(long)]
-        sandbox_id: String,
+        #[arg(long, conflicts_with = "name")]
+        sandbox_id: Option<String>,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        name: Option<String>,
     },
     Inspect {
         #[arg(long)]
@@ -100,6 +106,8 @@ enum Command {
     Shell {
         #[arg(long)]
         sandbox_id: Option<String>,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        name: Option<String>,
         #[arg(long, default_value = "/bin/sh")]
         shell: String,
         #[arg(long, conflicts_with = "sandbox_id")]
@@ -151,6 +159,36 @@ enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SnapshotCommand {
+    Create {
+        #[arg(long, conflicts_with = "name")]
+        sandbox_id: Option<String>,
+        #[arg(long, conflicts_with = "sandbox_id")]
+        name: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Restore {
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        template: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -178,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Run {
             sandbox_id,
+            name,
             template,
             cmd,
             network,
@@ -201,6 +240,10 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
                 return Ok(());
             }
+            if let Some(name) = name {
+                run_by_name_remote(cli.server_url, name, cmd, timeout, writes, reads, json).await?;
+                return Ok(());
+            }
 
             let config = SandboxConfig {
                 template,
@@ -213,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
             run_remote(cli.server_url, config, cmd, timeout, writes, reads, json).await?;
         }
         Command::Create {
+            name,
             template,
             network,
             allow,
@@ -225,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
             let mut client = connect_client(cli.server_url, true).await?;
             let info = client
                 .create_sandbox(SandboxConfig {
+                    affinity_name: name,
                     template,
                     memory_mb,
                     vcpu_count,
@@ -248,9 +293,16 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", info.id.0);
             }
         }
-        Command::Destroy { sandbox_id } => {
+        Command::Destroy { sandbox_id, name } => {
             let mut client = connect_client(cli.server_url, false).await?;
-            let sandbox_id = parse_sandbox_id(&sandbox_id)?;
+            let sandbox_id = if let Some(raw) = sandbox_id {
+                parse_sandbox_id(&raw)?
+            } else if let Some(name) = name {
+                let (info, _) = client.resolve_affinity(&name, false).await?;
+                info.id
+            } else {
+                bail!("destroy requires either --sandbox-id or --name");
+            };
             client.destroy_sandbox(&sandbox_id).await?;
         }
         Command::Inspect { sandbox_id, json } => {
@@ -273,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Shell {
             sandbox_id,
+            name,
             shell,
             template,
             workspace,
@@ -282,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
             let exit_code = shell_command(
                 cli.server_url,
                 sandbox_id,
+                name,
                 &shell,
                 template.unwrap_or_else(|| "python:3.12".to_string()),
                 workspace,
@@ -404,6 +458,9 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Snapshot { command } => {
+            run_snapshot_command(cli.server_url, command).await?;
+        }
     }
 
     Ok(())
@@ -413,6 +470,12 @@ fn parse_sandbox_id(raw: &str) -> anyhow::Result<SandboxId> {
     let id = uuid::Uuid::parse_str(raw)
         .with_context(|| format!("invalid sandbox id `{raw}`: expected UUID"))?;
     Ok(SandboxId(id))
+}
+
+fn parse_snapshot_id(raw: &str) -> anyhow::Result<SnapshotId> {
+    let id = uuid::Uuid::parse_str(raw)
+        .with_context(|| format!("invalid snapshot id `{raw}`: expected UUID"))?;
+    Ok(SnapshotId(id))
 }
 
 fn init_tracing() {
@@ -599,9 +662,72 @@ async fn run_existing_remote(
     Ok(())
 }
 
+async fn run_by_name_remote(
+    server_url: Option<String>,
+    name: String,
+    cmd: String,
+    timeout: u64,
+    writes: Vec<String>,
+    reads: Vec<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
+    let (info, restored) = client.resolve_affinity(&name, true).await?;
+    info!(
+        affinity = %name,
+        sandbox_id = %info.id.0,
+        restored,
+        "resolved affinity for run command"
+    );
+    run_existing_with_client(client, info.id, cmd, timeout, writes, reads, json).await
+}
+
+async fn run_existing_with_client(
+    mut client: GrpcControlClient,
+    sandbox_id: SandboxId,
+    cmd: String,
+    timeout: u64,
+    writes: Vec<String>,
+    reads: Vec<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    for entry in writes {
+        let (path, content) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
+        client
+            .write_file(&sandbox_id, path.to_string(), content.as_bytes().to_vec())
+            .await?;
+    }
+
+    let outcome = client
+        .exec(
+            &sandbox_id,
+            ExecRequest {
+                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
+                timeout_secs: timeout,
+            },
+        )
+        .await?;
+
+    let mut artifacts = Vec::new();
+    for path in reads {
+        let bytes = client.read_file(&sandbox_id, path.clone()).await?;
+        artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
+    }
+
+    let exit_code = emit_result(outcome, artifacts, json)?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
 async fn shell_command(
     server_url: Option<String>,
     sandbox_id: Option<String>,
+    affinity_name: Option<String>,
     shell: &str,
     template: String,
     workspace: Option<String>,
@@ -609,6 +735,18 @@ async fn shell_command(
 ) -> anyhow::Result<i32> {
     if let Some(sandbox_id) = sandbox_id {
         return open_shell(server_url, &sandbox_id, shell).await;
+    }
+    if let Some(name) = affinity_name {
+        let autostart_default = server_url.is_none();
+        let mut client = connect_client(server_url, autostart_default).await?;
+        let (info, restored) = client.resolve_affinity(&name, true).await?;
+        info!(
+            affinity = %name,
+            sandbox_id = %info.id.0,
+            restored,
+            "resolved affinity for shell command"
+        );
+        return open_shell_with_client(&mut client, &info.id, shell).await;
     }
 
     let workspace_dir = match workspace {
@@ -910,6 +1048,90 @@ fn extract_container_bin_from_helper_argv(argv: &[String]) -> Option<String> {
     None
 }
 
+async fn run_snapshot_command(
+    server_url: Option<String>,
+    command: SnapshotCommand,
+) -> anyhow::Result<()> {
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
+    match command {
+        SnapshotCommand::Create {
+            sandbox_id,
+            name,
+            note,
+            json,
+        } => {
+            let sandbox_id = if let Some(raw) = sandbox_id {
+                parse_sandbox_id(&raw)?
+            } else if let Some(name) = name {
+                let (info, _) = client.resolve_affinity(&name, false).await?;
+                info.id
+            } else {
+                bail!("snapshot create requires either --sandbox-id or --name");
+            };
+            let (snapshot_id, created_at) = client.create_snapshot(&sandbox_id, note).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&SnapshotCreateResponse {
+                        snapshot_id: snapshot_id.0.to_string(),
+                        sandbox_id: sandbox_id.0.to_string(),
+                        created_at,
+                    })?
+                );
+            } else {
+                println!("{}", snapshot_id.0);
+            }
+        }
+        SnapshotCommand::Restore { snapshot_id, json } => {
+            let snapshot_id = parse_snapshot_id(&snapshot_id)?;
+            let info = client.restore_snapshot(&snapshot_id).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&SandboxInfoResponse {
+                        sandbox_id: info.id.0.to_string(),
+                        template: info.template,
+                        state: format!("{:?}", info.state).to_lowercase(),
+                        created_at: info.created_at.to_rfc3339(),
+                    })?
+                );
+            } else {
+                println!("{}", info.id.0);
+            }
+        }
+        SnapshotCommand::List { template, json } => {
+            let template = template.unwrap_or_else(|| SandboxConfig::default().template);
+            let snapshots = client.list_snapshots(&template).await?;
+            if json {
+                let rows: Vec<SnapshotListItemResponse> = snapshots
+                    .into_iter()
+                    .map(|s| SnapshotListItemResponse {
+                        snapshot_id: s.id.0.to_string(),
+                        sandbox_id: s.sandbox_id.0.to_string(),
+                        template: s.template,
+                        affinity_name: s.affinity_name,
+                        created_at: s.created_at.to_rfc3339(),
+                        note: s.note,
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&rows)?);
+            } else {
+                for snapshot in snapshots {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        snapshot.id.0,
+                        snapshot.template,
+                        snapshot.affinity_name.unwrap_or_else(|| "-".to_string()),
+                        snapshot.created_at.to_rfc3339()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum ProxyRequest {
@@ -1084,6 +1306,23 @@ struct BenchSummary {
     p95_ms: u128,
     min_ms: u128,
     max_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotCreateResponse {
+    snapshot_id: String,
+    sandbox_id: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotListItemResponse {
+    snapshot_id: String,
+    sandbox_id: String,
+    template: String,
+    affinity_name: Option<String>,
+    created_at: String,
+    note: Option<String>,
 }
 
 async fn bench_local(

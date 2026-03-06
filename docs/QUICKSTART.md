@@ -47,6 +47,29 @@ cargo run -p hyperbox-cli -- run --sandbox-id "$SANDBOX_ID" --cmd "pytest -q"
 cargo run -p hyperbox-cli -- destroy --sandbox-id "$SANDBOX_ID"
 ```
 
+## Use Affinity + Snapshot Restore
+
+```bash
+# Create a named sandbox bound to this workspace.
+cargo run -p hyperbox-cli -- create --name myproj --workspace "$PWD"
+
+# Reuse by name.
+cargo run -p hyperbox-cli -- run --name myproj --cmd "python3 -V"
+
+# Save a snapshot for later restore.
+SNAPSHOT_ID=$(cargo run -p hyperbox-cli -- snapshot create --name myproj)
+echo "$SNAPSHOT_ID"
+
+# Tear down the active sandbox.
+cargo run -p hyperbox-cli -- destroy --name myproj
+
+# Restore from snapshot automatically when name has no active sandbox.
+cargo run -p hyperbox-cli -- run --name myproj --cmd "pwd"
+
+# You can also restore explicitly by id.
+cargo run -p hyperbox-cli -- snapshot restore --snapshot-id "$SNAPSHOT_ID"
+```
+
 ## Open an interactive shell
 
 ```bash
