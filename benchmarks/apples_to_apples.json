@@ -1,5 +1,5 @@
 {
-  "timestamp_utc": "2026-03-06T05:35:48Z",
+  "timestamp_utc": "2026-03-06T06:28:44Z",
   "host": {
     "platform": "darwin",
     "workspace": "/Users/samratj/Documents/scratch/hyperbox"
@@ -17,40 +17,40 @@
     "hyperbox_run": {
       "runs": 20,
       "warmup": 5,
-      "mean_ms": 847.03,
-      "p50_ms": 856.75,
-      "p95_ms": 913.0,
-      "min_ms": 716.26,
-      "max_ms": 941.52
+      "mean_ms": 812.5,
+      "p50_ms": 813.19,
+      "p95_ms": 858.46,
+      "min_ms": 722.44,
+      "max_ms": 888.7
     },
     "docker_run": {
       "runs": 20,
       "warmup": 5,
-      "mean_ms": 112.03,
-      "p50_ms": 110.94,
-      "p95_ms": 122.18,
-      "min_ms": 102.88,
-      "max_ms": 125.34
+      "mean_ms": 120.74,
+      "p50_ms": 114.78,
+      "p95_ms": 138.64,
+      "min_ms": 104.69,
+      "max_ms": 155.33
     }
   },
   "warm_exec": {
     "hyperbox_run_existing": {
       "runs": 20,
       "warmup": 5,
-      "mean_ms": 54.2,
-      "p50_ms": 53.8,
-      "p95_ms": 59.92,
-      "min_ms": 45.78,
-      "max_ms": 62.65
+      "mean_ms": 56.67,
+      "p50_ms": 56.98,
+      "p95_ms": 60.63,
+      "min_ms": 50.78,
+      "max_ms": 61.81
     },
     "docker_exec": {
       "runs": 20,
       "warmup": 5,
-      "mean_ms": 44.41,
-      "p50_ms": 44.84,
-      "p95_ms": 47.96,
-      "min_ms": 35.66,
-      "max_ms": 53.75
+      "mean_ms": 42.79,
+      "p50_ms": 42.63,
+      "p95_ms": 47.0,
+      "min_ms": 38.31,
+      "max_ms": 47.84
     }
   }
 }
