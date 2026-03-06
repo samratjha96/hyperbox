@@ -486,43 +486,59 @@ async fn run_remote(
         "run command sandbox created"
     );
 
-    for entry in writes {
-        let (path, content) = entry
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
-        client
-            .write_file(&sandbox.id, path.to_string(), content.as_bytes().to_vec())
+    let run_result: anyhow::Result<i32> = async {
+        for entry in writes {
+            let (path, content) = entry
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
+            client
+                .write_file(&sandbox.id, path.to_string(), content.as_bytes().to_vec())
+                .await?;
+        }
+
+        let exec_started = Instant::now();
+        let outcome = client
+            .exec(
+                &sandbox.id,
+                ExecRequest {
+                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
+                    timeout_secs: timeout,
+                },
+            )
             .await?;
+        info!(
+            sandbox_id = %sandbox.id.0,
+            stage = "exec",
+            elapsed_ms = exec_started.elapsed().as_millis() as u64,
+            exec_duration_ms = outcome.duration_ms as u64,
+            exit_code = outcome.exit_code,
+            "run command execution completed"
+        );
+
+        let mut artifacts = Vec::new();
+        for path in reads {
+            let bytes = client.read_file(&sandbox.id, path.clone()).await?;
+            artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
+        }
+
+        emit_result(outcome, artifacts, json)
     }
+    .await;
 
-    let exec_started = Instant::now();
-    let outcome = client
-        .exec(
-            &sandbox.id,
-            ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
-                timeout_secs: timeout,
-            },
-        )
-        .await?;
-    info!(
-        sandbox_id = %sandbox.id.0,
-        stage = "exec",
-        elapsed_ms = exec_started.elapsed().as_millis() as u64,
-        exec_duration_ms = outcome.duration_ms as u64,
-        exit_code = outcome.exit_code,
-        "run command execution completed"
-    );
-
-    let mut artifacts = Vec::new();
-    for path in reads {
-        let bytes = client.read_file(&sandbox.id, path.clone()).await?;
-        artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
-    }
-
-    emit_result(outcome, artifacts, json)?;
     let destroy_started = Instant::now();
-    client.destroy_sandbox(&sandbox.id).await?;
+    let destroy_result = client.destroy_sandbox(&sandbox.id).await;
+    if let Err(err) = destroy_result {
+        warn!(
+            sandbox_id = %sandbox.id.0,
+            stage = "destroy",
+            elapsed_ms = destroy_started.elapsed().as_millis() as u64,
+            error = %err,
+            "run command sandbox destroy failed"
+        );
+        if run_result.is_ok() {
+            return Err(err);
+        }
+    }
     info!(
         sandbox_id = %sandbox.id.0,
         stage = "destroy",
@@ -530,6 +546,11 @@ async fn run_remote(
         total_elapsed_ms = op_started.elapsed().as_millis() as u64,
         "run command sandbox destroyed"
     );
+
+    let exit_code = run_result?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 
@@ -571,7 +592,10 @@ async fn run_existing_remote(
         artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
     }
 
-    emit_result(outcome, artifacts, json)?;
+    let exit_code = emit_result(outcome, artifacts, json)?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 
@@ -1009,7 +1033,7 @@ fn emit_result(
     outcome: hyperbox_core::ExecOutcome,
     artifacts: Vec<(String, String)>,
     json: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     if json {
         let response = RunResponse {
             exit_code: outcome.exit_code,
@@ -1031,11 +1055,7 @@ fn emit_result(
         }
     }
 
-    if outcome.exit_code != 0 {
-        std::process::exit(outcome.exit_code);
-    }
-
-    Ok(())
+    Ok(outcome.exit_code)
 }
 
 #[derive(Debug, Serialize)]
