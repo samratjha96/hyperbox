@@ -639,6 +639,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -657,6 +658,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

@@ -1,4 +1,9 @@
-use std::{io::IsTerminal, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    io::IsTerminal,
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -9,6 +14,8 @@ use tokio::{
     time::sleep,
 };
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::{debug, info, warn};
+use tracing_subscriber::EnvFilter;
 
 use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId};
 use hyperbox_proto::hyperbox::v1::{
@@ -165,6 +172,7 @@ impl NetworkArg {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_tracing();
     let cli = Cli::parse();
 
     match cli.command {
@@ -407,6 +415,18 @@ fn parse_sandbox_id(raw: &str) -> anyhow::Result<SandboxId> {
     Ok(SandboxId(id))
 }
 
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("hyperbox=warn,hyperbox_server=warn,hyperbox_apple=warn")
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 fn spawn_local_server() -> anyhow::Result<()> {
     let current_exe = std::env::current_exe().context("resolve current executable path")?;
     let mut cmd = std::process::Command::new(current_exe);
@@ -454,9 +474,17 @@ async fn run_remote(
     reads: Vec<String>,
     json: bool,
 ) -> anyhow::Result<()> {
+    let op_started = Instant::now();
     let autostart_default = server_url.is_none();
     let mut client = connect_client(server_url, autostart_default).await?;
+    let create_started = Instant::now();
     let sandbox = client.create_sandbox(config).await?;
+    info!(
+        sandbox_id = %sandbox.id.0,
+        stage = "create",
+        elapsed_ms = create_started.elapsed().as_millis() as u64,
+        "run command sandbox created"
+    );
 
     for entry in writes {
         let (path, content) = entry
@@ -467,6 +495,7 @@ async fn run_remote(
             .await?;
     }
 
+    let exec_started = Instant::now();
     let outcome = client
         .exec(
             &sandbox.id,
@@ -476,6 +505,14 @@ async fn run_remote(
             },
         )
         .await?;
+    info!(
+        sandbox_id = %sandbox.id.0,
+        stage = "exec",
+        elapsed_ms = exec_started.elapsed().as_millis() as u64,
+        exec_duration_ms = outcome.duration_ms as u64,
+        exit_code = outcome.exit_code,
+        "run command execution completed"
+    );
 
     let mut artifacts = Vec::new();
     for path in reads {
@@ -484,7 +521,15 @@ async fn run_remote(
     }
 
     emit_result(outcome, artifacts, json)?;
+    let destroy_started = Instant::now();
     client.destroy_sandbox(&sandbox.id).await?;
+    info!(
+        sandbox_id = %sandbox.id.0,
+        stage = "destroy",
+        elapsed_ms = destroy_started.elapsed().as_millis() as u64,
+        total_elapsed_ms = op_started.elapsed().as_millis() as u64,
+        "run command sandbox destroyed"
+    );
     Ok(())
 }
 
@@ -554,6 +599,12 @@ async fn shell_command(
 
     let autostart_default = server_url.is_none();
     let mut client = connect_client(server_url, autostart_default).await?;
+    info!(
+        template = %template,
+        workspace = ?workspace_dir,
+        "creating ephemeral shell sandbox"
+    );
+    let create_started = Instant::now();
     let sandbox = client
         .create_sandbox(SandboxConfig {
             template,
@@ -562,9 +613,38 @@ async fn shell_command(
             ..SandboxConfig::default()
         })
         .await?;
+    info!(
+        sandbox_id = %sandbox.id.0,
+        stage = "create",
+        elapsed_ms = create_started.elapsed().as_millis() as u64,
+        "ephemeral shell sandbox created"
+    );
 
+    let attach_started = Instant::now();
     let shell_result = open_shell_with_client(&mut client, &sandbox.id, shell).await;
+    info!(
+        sandbox_id = %sandbox.id.0,
+        stage = "attach",
+        elapsed_ms = attach_started.elapsed().as_millis() as u64,
+        "ephemeral shell session ended"
+    );
+    let destroy_started = Instant::now();
     let destroy_result = client.destroy_sandbox(&sandbox.id).await;
+    match &destroy_result {
+        Ok(()) => info!(
+            sandbox_id = %sandbox.id.0,
+            stage = "destroy",
+            elapsed_ms = destroy_started.elapsed().as_millis() as u64,
+            "ephemeral shell sandbox destroyed"
+        ),
+        Err(err) => warn!(
+            sandbox_id = %sandbox.id.0,
+            stage = "destroy",
+            elapsed_ms = destroy_started.elapsed().as_millis() as u64,
+            error = %err,
+            "failed to destroy ephemeral shell sandbox"
+        ),
+    }
 
     match (shell_result, destroy_result) {
         (Ok(code), Ok(())) => Ok(code),
@@ -610,6 +690,17 @@ async fn open_shell_with_client(
             return Err(err);
         }
     };
+    info!(
+        sandbox_id = %sandbox_id.0,
+        backend = %server_info.backend_selected,
+        "opening interactive shell"
+    );
+    debug!(
+        sandbox_id = %sandbox_id.0,
+        backend_reason = %server_info.backend_reason,
+        helper_argv = ?server_info.apple_helper_argv,
+        "resolved shell backend details"
+    );
 
     if server_info.backend_selected == "firecracker" {
         return open_shell_via_agent_stream(&sandbox_id, shell).await;
@@ -746,6 +837,11 @@ async fn open_shell_via_agent_stream(sandbox_id: &SandboxId, shell: &str) -> any
         anyhow::Ok(())
     });
 
+    info!(
+        sandbox_id = %sandbox_id.0,
+        shell = %shell,
+        "attached shell via agent stream"
+    );
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
     while let Some(event) = stream.message().await.context("read shell stream event")? {

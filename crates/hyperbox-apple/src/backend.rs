@@ -8,6 +8,7 @@ use tokio::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout},
     sync::Mutex,
 };
+use tracing::{debug, info, warn};
 
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
@@ -85,7 +86,7 @@ enum HelperResponse {
         exit_code: i32,
         stdout: String,
         stderr: String,
-        duration_ms: u128,
+        duration_ms: u64,
     },
     Read {
         bytes_b64: String,
@@ -198,6 +199,7 @@ impl AppleVzBackend {
 #[async_trait::async_trait]
 impl SandboxBackend for AppleVzBackend {
     async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+        let create_started = std::time::Instant::now();
         if !matches!(config.network, NetworkMode::None) {
             return Err(HyperboxError::InvalidConfig(
                 "apple backend network policy enforcement is not implemented yet; use network=none"
@@ -238,6 +240,7 @@ impl SandboxBackend for AppleVzBackend {
 
         let mut helper = self.start_helper_if_needed(&id).await?;
         if let Some(helper_session) = helper.as_mut() {
+            let helper_create_started = std::time::Instant::now();
             let response = helper_session
                 .request(&HelperRequest::Create {
                     sandbox_id: id.0.to_string(),
@@ -246,6 +249,12 @@ impl SandboxBackend for AppleVzBackend {
                     runtime: self.runtime_name().to_string(),
                 })
                 .await?;
+            debug!(
+                sandbox_id = %id.0,
+                stage = "helper_create",
+                elapsed_ms = helper_create_started.elapsed().as_millis() as u64,
+                "apple helper create request finished"
+            );
             match response {
                 HelperResponse::Ack => {}
                 HelperResponse::Error { message } => {
@@ -269,6 +278,12 @@ impl SandboxBackend for AppleVzBackend {
                 helper,
             },
         );
+        info!(
+            sandbox_id = %id.0,
+            stage = "create",
+            elapsed_ms = create_started.elapsed().as_millis() as u64,
+            "apple backend sandbox created"
+        );
 
         Ok(SandboxLease { id, info })
     }
@@ -278,12 +293,14 @@ impl SandboxBackend for AppleVzBackend {
         sandbox_id: &SandboxId,
         req: hyperbox_core::ExecRequest,
     ) -> Result<hyperbox_core::ExecOutcome> {
+        let exec_started = std::time::Instant::now();
         let mut sandboxes = self.sandboxes.lock().await;
         let sandbox = sandboxes
             .get_mut(sandbox_id)
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
         if let Some(helper) = sandbox.helper.as_mut() {
+            let helper_exec_started = std::time::Instant::now();
             match helper
                 .request(&HelperRequest::Exec {
                     sandbox_id: sandbox_id.0.to_string(),
@@ -298,11 +315,20 @@ impl SandboxBackend for AppleVzBackend {
                     stderr,
                     duration_ms,
                 } => {
+                    info!(
+                        sandbox_id = %sandbox_id.0,
+                        stage = "exec",
+                        helper_exec_ms = duration_ms,
+                        backend_elapsed_ms = exec_started.elapsed().as_millis() as u64,
+                        round_trip_ms = helper_exec_started.elapsed().as_millis() as u64,
+                        exit_code,
+                        "apple backend exec completed via helper"
+                    );
                     return Ok(hyperbox_core::ExecOutcome {
                         exit_code,
                         stdout,
                         stderr,
-                        duration_ms,
+                        duration_ms: duration_ms as u128,
                     });
                 }
                 HelperResponse::Error { message } => {
@@ -330,6 +356,13 @@ impl SandboxBackend for AppleVzBackend {
             .await
             .map_err(|e| HyperboxError::ExecutionFailed(format!("exec via agent: {e}")))?
             .into_inner();
+        info!(
+            sandbox_id = %sandbox_id.0,
+            stage = "exec_via_agent",
+            elapsed_ms = exec_started.elapsed().as_millis() as u64,
+            exit_code = response.exit_code,
+            "apple backend exec completed via agent path"
+        );
         Ok(hyperbox_core::ExecOutcome {
             exit_code: response.exit_code,
             stdout: response.stdout,
@@ -435,6 +468,7 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
+        let destroy_started = std::time::Instant::now();
         let mut sandbox = self
             .sandboxes
             .lock()
@@ -443,8 +477,21 @@ impl SandboxBackend for AppleVzBackend {
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
         if let Some(helper) = sandbox.helper.as_mut() {
-            helper.shutdown(sandbox_id).await?;
+            if let Err(err) = helper.shutdown(sandbox_id).await {
+                warn!(
+                    sandbox_id = %sandbox_id.0,
+                    error = %err,
+                    "apple backend failed to shutdown helper cleanly"
+                );
+                return Err(err);
+            }
         }
+        info!(
+            sandbox_id = %sandbox_id.0,
+            stage = "destroy",
+            elapsed_ms = destroy_started.elapsed().as_millis() as u64,
+            "apple backend sandbox destroyed"
+        );
 
         Ok(())
     }

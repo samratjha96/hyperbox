@@ -16,3 +16,4 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tonic = { version = "0.12", features = ["transport"] }
+tracing.workspace = true

@@ -13,6 +13,7 @@ use tokio::{
     process::Command,
     time::{Duration, timeout},
 };
+use tracing::{debug, info, warn};
 
 const WORKDIR_IN_CONTAINER: &str = "/workspace";
 const DEFAULT_IO_TIMEOUT_SECS: u64 = 60;
@@ -79,7 +80,7 @@ enum HelperResponse {
         exit_code: i32,
         stdout: String,
         stderr: String,
-        duration_ms: u128,
+        duration_ms: u64,
     },
     Read {
         bytes_b64: String,
@@ -94,7 +95,7 @@ struct CommandResult {
     exit_code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    duration_ms: u128,
+    duration_ms: u64,
 }
 
 pub async fn run(config: AppleHelperConfig) -> anyhow::Result<()> {
@@ -181,6 +182,7 @@ impl AppleHelper {
         workspace_dir: Option<String>,
         runtime: String,
     ) -> anyhow::Result<HelperResponse> {
+        let started = Instant::now();
         let sandbox_id = sanitize_sandbox_id(&sandbox_id)?;
         let runtime = RuntimeKind::parse(&runtime)?;
 
@@ -230,12 +232,19 @@ impl AppleHelper {
             })?;
 
         self.sandboxes.insert(
-            sandbox_id,
+            sandbox_id.clone(),
             SandboxSession {
                 container_name,
                 workspace_host,
                 ephemeral_workspace,
             },
+        );
+
+        info!(
+            sandbox_id = %sandbox_id,
+            stage = "create",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "apple helper sandbox created"
         );
 
         Ok(HelperResponse::Ack)
@@ -283,6 +292,7 @@ impl AppleHelper {
         command: Vec<String>,
         timeout_secs: u64,
     ) -> anyhow::Result<HelperResponse> {
+        let started = Instant::now();
         if command.is_empty() {
             bail!("command cannot be empty");
         }
@@ -304,12 +314,19 @@ impl AppleHelper {
             .run_container_command(args, None, timeout_secs.max(1))
             .await?;
 
-        Ok(HelperResponse::Exec {
+        let response = HelperResponse::Exec {
             exit_code: result.exit_code,
             stdout: String::from_utf8_lossy(&result.stdout).to_string(),
             stderr: String::from_utf8_lossy(&result.stderr).to_string(),
             duration_ms: result.duration_ms,
-        })
+        };
+        info!(
+            sandbox_id = %sandbox_id,
+            stage = "exec",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "apple helper command execution completed"
+        );
+        Ok(response)
     }
 
     async fn read_file(
@@ -419,6 +436,7 @@ impl AppleHelper {
     }
 
     async fn destroy_sandbox(&mut self, sandbox_id: String) -> anyhow::Result<HelperResponse> {
+        let started = Instant::now();
         let Some(session) = self.sandboxes.remove(&sandbox_id) else {
             return Ok(HelperResponse::Ack);
         };
@@ -456,6 +474,12 @@ impl AppleHelper {
             }
         }
 
+        info!(
+            sandbox_id = %sandbox_id,
+            stage = "destroy",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "apple helper sandbox destroyed"
+        );
         Ok(HelperResponse::Ack)
     }
 
@@ -465,6 +489,7 @@ impl AppleHelper {
         stdin_payload: Option<Vec<u8>>,
         timeout_secs: u64,
     ) -> anyhow::Result<CommandResult> {
+        debug!(args = ?args, timeout_secs, "apple helper spawning container command");
         let mut cmd = Command::new(&self.config.container_bin);
         cmd.args(&args);
         cmd.stdout(Stdio::piped());
@@ -526,6 +551,7 @@ impl AppleHelper {
                 let _ = child.wait().await;
                 let _ = stdout_task.await;
                 let _ = stderr_task.await;
+                warn!(timeout_secs, "apple helper command timed out");
                 bail!("command timed out after {timeout_secs}s");
             }
         };
@@ -537,7 +563,7 @@ impl AppleHelper {
             exit_code: status.code().unwrap_or(1),
             stdout,
             stderr,
-            duration_ms: started_at.elapsed().as_millis(),
+            duration_ms: started_at.elapsed().as_millis() as u64,
         })
     }
 }
