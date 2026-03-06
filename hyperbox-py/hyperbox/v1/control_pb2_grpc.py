@@ -89,6 +89,16 @@ class HyperboxControlStub(object):
                 request_serializer=hyperbox_dot_v1_dot_control__pb2.RestoreSnapshotRequest.SerializeToString,
                 response_deserializer=hyperbox_dot_v1_dot_control__pb2.RestoreSnapshotResponse.FromString,
                 _registered_method=True)
+        self.ListSnapshots = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/ListSnapshots',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.ListSnapshotsRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.ListSnapshotsResponse.FromString,
+                _registered_method=True)
+        self.ResolveAffinity = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/ResolveAffinity',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.ResolveAffinityRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.ResolveAffinityResponse.FromString,
+                _registered_method=True)
 
 
 class HyperboxControlServicer(object):
@@ -160,6 +170,18 @@ class HyperboxControlServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListSnapshots(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ResolveAffinity(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_HyperboxControlServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -217,6 +239,16 @@ def add_HyperboxControlServicer_to_server(servicer, server):
                     servicer.RestoreSnapshot,
                     request_deserializer=hyperbox_dot_v1_dot_control__pb2.RestoreSnapshotRequest.FromString,
                     response_serializer=hyperbox_dot_v1_dot_control__pb2.RestoreSnapshotResponse.SerializeToString,
+            ),
+            'ListSnapshots': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListSnapshots,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.ListSnapshotsRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.ListSnapshotsResponse.SerializeToString,
+            ),
+            'ResolveAffinity': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResolveAffinity,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.ResolveAffinityRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.ResolveAffinityResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -516,6 +548,60 @@ class HyperboxControl(object):
             '/hyperbox.v1.HyperboxControl/RestoreSnapshot',
             hyperbox_dot_v1_dot_control__pb2.RestoreSnapshotRequest.SerializeToString,
             hyperbox_dot_v1_dot_control__pb2.RestoreSnapshotResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListSnapshots(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/ListSnapshots',
+            hyperbox_dot_v1_dot_control__pb2.ListSnapshotsRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.ListSnapshotsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResolveAffinity(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/ResolveAffinity',
+            hyperbox_dot_v1_dot_control__pb2.ResolveAffinityRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.ResolveAffinityResponse.FromString,
             options,
             channel_credentials,
             insecure,

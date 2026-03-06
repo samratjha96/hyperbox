@@ -11,7 +11,7 @@ hyperbox is organized as a Rust workspace with trait-driven runtime abstractions
 - `hyperbox-agent`: shared agent protocol request/response schemas
 - `hyperbox-server`: runtime façade, local backend MVP, warm pool manager, metrics, snapshot metadata store
 - `hyperbox-cli`: operational CLI (`run`, `templates`, `probe`)
-- `hyperbox-py`: Python SDK that shells out to the CLI
+- `hyperbox-py`: Python SDK (direct gRPC client + compatibility CLI wrapper)
 
 ## Current Execution Model
 

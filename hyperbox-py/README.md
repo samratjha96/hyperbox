@@ -20,6 +20,15 @@ with HyperboxClient("127.0.0.1:50051") as client:
         result = box.exec("ls -la")
         print(result.stdout)
         print(box.sandbox_id)
+
+    info = client.create_sandbox(affinity_name="myproj", workspace=".")
+    snapshot_id, _ = client.create_snapshot(info.id, note="checkpoint")
+    client.destroy_sandbox(info.id)
+    restored, restored_from_snapshot = client.resolve_affinity(
+        "myproj", restore_if_needed=True
+    )
+    print(snapshot_id, restored_from_snapshot, restored.id)
+    client.destroy_sandbox(restored.id)
 ```
 
 ### CLI wrapper (backward compatible)

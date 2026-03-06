@@ -107,6 +107,7 @@ class HyperboxClient:
     def create_sandbox(
         self,
         *,
+        affinity_name: str | None = None,
         template: str = "python:3.12",
         memory_mb: int = 512,
         vcpu_count: int = 1,
@@ -134,6 +135,7 @@ class HyperboxClient:
             control_pb2.CreateSandboxRequest(
                 config=control_pb2.SandboxConfig(
                     template=template,
+                    affinity_name=affinity_name or "",
                     memory_mb=memory_mb,
                     vcpu_count=vcpu_count,
                     timeout_secs=timeout_secs,
@@ -158,6 +160,61 @@ class HyperboxClient:
         self._stub.DestroySandbox(
             control_pb2.DestroySandboxRequest(sandbox_id=sandbox_id),
             timeout=timeout_secs,
+        )
+
+    def create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        note: str | None = None,
+        timeout_secs: float = 30.0,
+    ) -> tuple[str, str]:
+        response = self._stub.CreateSnapshot(
+            control_pb2.CreateSnapshotRequest(
+                sandbox_id=sandbox_id,
+                template="",
+                note=note or "",
+            ),
+            timeout=timeout_secs,
+        )
+        return response.snapshot_id, response.created_at
+
+    def restore_snapshot(
+        self, snapshot_id: str, *, timeout_secs: float = 30.0
+    ) -> SandboxInfo:
+        response = self._stub.RestoreSnapshot(
+            control_pb2.RestoreSnapshotRequest(snapshot_id=snapshot_id),
+            timeout=timeout_secs,
+        )
+        if not response.info:
+            raise RuntimeError("restore_snapshot returned empty info")
+        return SandboxInfo(
+            id=response.info.id,
+            template=response.info.template,
+            state=response.info.state,
+            created_at=response.info.created_at,
+        )
+
+    def resolve_affinity(
+        self, name: str, *, restore_if_needed: bool = True, timeout_secs: float = 30.0
+    ) -> tuple[SandboxInfo, bool]:
+        response = self._stub.ResolveAffinity(
+            control_pb2.ResolveAffinityRequest(
+                name=name,
+                restore_if_needed=restore_if_needed,
+            ),
+            timeout=timeout_secs,
+        )
+        if not response.info:
+            raise RuntimeError("resolve_affinity returned empty info")
+        return (
+            SandboxInfo(
+                id=response.info.id,
+                template=response.info.template,
+                state=response.info.state,
+                created_at=response.info.created_at,
+            ),
+            bool(response.restored),
         )
 
     def inspect_sandbox(self, sandbox_id: str, *, timeout_secs: float = 10.0) -> SandboxInfo:
@@ -239,6 +296,7 @@ class SandboxSession:
         workspace: str | None = None,
         network: str = "none",
         allowlist: Iterable[str] | None = None,
+        affinity_name: str | None = None,
     ) -> None:
         self.client = client
         self.template = template
@@ -249,6 +307,7 @@ class SandboxSession:
         self.workspace = workspace
         self.network = network
         self.allowlist = list(allowlist or [])
+        self.affinity_name = affinity_name
         self._sandbox_id: str | None = None
 
     @property
@@ -266,6 +325,7 @@ class SandboxSession:
         if self._sandbox_id:
             return self._sandbox_id
         info = self.client.create_sandbox(
+            affinity_name=self.affinity_name,
             template=self.template,
             memory_mb=self.memory_mb,
             vcpu_count=self.vcpu_count,
