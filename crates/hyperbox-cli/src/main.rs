@@ -148,6 +148,18 @@ enum Command {
         state_root: Option<String>,
     },
     Bench {
+        #[command(subcommand)]
+        command: BenchCommand,
+    },
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BenchCommand {
+    Exec {
         #[arg(long, default_value = "python:3.12")]
         template: String,
         #[arg(long)]
@@ -160,8 +172,31 @@ enum Command {
         json: bool,
     },
     Snapshot {
-        #[command(subcommand)]
-        command: SnapshotCommand,
+        #[arg(long, default_value = "python:3.12")]
+        template: String,
+        #[arg(long, value_enum, default_value_t = NetworkArg::None)]
+        network: NetworkArg,
+        #[arg(long = "allow")]
+        allow: Vec<String>,
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(
+            long,
+            default_value = "echo state-one > hb-state.txt && mkdir -p .hb-bench && echo state-two > .hb-bench/state.txt"
+        )]
+        mutate_cmd: String,
+        #[arg(long, default_value = "cat hb-state.txt && cat .hb-bench/state.txt")]
+        verify_cmd: String,
+        #[arg(long, default_value_t = 5)]
+        runs: usize,
+        #[arg(long, default_value_t = 1)]
+        warmup: usize,
+        #[arg(long, default_value_t = 240)]
+        timeout: u64,
+        #[arg(long, default_value_t = false)]
+        keep_snapshot_artifacts: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -426,38 +461,77 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
         }
-        Command::Bench {
-            template,
-            cmd,
-            runs,
-            warmup,
-            json,
-        } => {
-            let config = SandboxConfig {
+        Command::Bench { command } => match command {
+            BenchCommand::Exec {
                 template,
-                ..SandboxConfig::default()
-            };
-            let summary = if let Some(server_url) = cli.server_url {
-                bench_remote(server_url, config, cmd, warmup, runs).await?
-            } else {
-                bench_local(config, cmd, warmup, runs).await?
-            };
+                cmd,
+                runs,
+                warmup,
+                json,
+            } => {
+                let config = SandboxConfig {
+                    template,
+                    ..SandboxConfig::default()
+                };
+                let summary = if let Some(server_url) = cli.server_url {
+                    bench_remote(server_url, config, cmd, warmup, runs).await?
+                } else {
+                    bench_local(config, cmd, warmup, runs).await?
+                };
 
-            if json {
-                println!("{}", serde_json::to_string(&summary)?);
-            } else {
-                println!(
-                    "runs={} warmup={} mean_ms={:.2} p50_ms={} p95_ms={} min_ms={} max_ms={}",
-                    summary.runs,
-                    summary.warmup,
-                    summary.mean_ms,
-                    summary.p50_ms,
-                    summary.p95_ms,
-                    summary.min_ms,
-                    summary.max_ms
-                );
+                if json {
+                    println!("{}", serde_json::to_string(&summary)?);
+                } else {
+                    println!(
+                        "runs={} warmup={} mean_ms={:.2} p50_ms={} p95_ms={} min_ms={} max_ms={}",
+                        summary.runs,
+                        summary.warmup,
+                        summary.mean_ms,
+                        summary.p50_ms,
+                        summary.p95_ms,
+                        summary.min_ms,
+                        summary.max_ms
+                    );
+                }
             }
-        }
+            BenchCommand::Snapshot {
+                template,
+                network,
+                allow,
+                workspace,
+                mutate_cmd,
+                verify_cmd,
+                runs,
+                warmup,
+                timeout,
+                keep_snapshot_artifacts,
+                json,
+            } => {
+                let config = SandboxConfig {
+                    template,
+                    network: network.to_mode(allow),
+                    timeout_secs: timeout,
+                    workspace_dir: workspace,
+                    ..SandboxConfig::default()
+                };
+                let summary = bench_snapshot_remote(
+                    cli.server_url,
+                    config,
+                    mutate_cmd,
+                    verify_cmd,
+                    warmup,
+                    runs,
+                    timeout,
+                    keep_snapshot_artifacts,
+                )
+                .await?;
+                if json {
+                    println!("{}", serde_json::to_string(&summary)?);
+                } else {
+                    print_snapshot_bench_summary(&summary);
+                }
+            }
+        },
         Command::Snapshot { command } => {
             run_snapshot_command(cli.server_url, command).await?;
         }
@@ -1309,6 +1383,44 @@ struct BenchSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct SnapshotBenchStageSummary {
+    mean_ms: f64,
+    p50_ms: u128,
+    p95_ms: u128,
+    min_ms: u128,
+    max_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotBenchRun {
+    run: usize,
+    sandbox_id: String,
+    restored_sandbox_id: String,
+    snapshot_id: String,
+    create_ms: u128,
+    mutate_ms: u128,
+    snapshot_create_ms: u128,
+    destroy_initial_ms: u128,
+    restore_verify_ms: u128,
+    destroy_restored_ms: u128,
+    total_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct SnapshotBenchSummary {
+    runs: usize,
+    warmup: usize,
+    create_ms: SnapshotBenchStageSummary,
+    mutate_ms: SnapshotBenchStageSummary,
+    snapshot_create_ms: SnapshotBenchStageSummary,
+    destroy_initial_ms: SnapshotBenchStageSummary,
+    restore_verify_ms: SnapshotBenchStageSummary,
+    destroy_restored_ms: SnapshotBenchStageSummary,
+    total_ms: SnapshotBenchStageSummary,
+    raw_runs: Vec<SnapshotBenchRun>,
+}
+
+#[derive(Debug, Serialize)]
 struct SnapshotCreateResponse {
     snapshot_id: String,
     sandbox_id: String,
@@ -1385,6 +1497,167 @@ async fn bench_remote(
     Ok(summarize_samples(samples, warmup))
 }
 
+async fn bench_snapshot_remote(
+    server_url: Option<String>,
+    config: SandboxConfig,
+    mutate_cmd: String,
+    verify_cmd: String,
+    warmup: usize,
+    runs: usize,
+    timeout_secs: u64,
+    keep_snapshot_artifacts: bool,
+) -> anyhow::Result<SnapshotBenchSummary> {
+    let mut client = connect_client(server_url, true).await?;
+    let total_runs = warmup + runs;
+
+    let mut create_samples = Vec::with_capacity(runs);
+    let mut mutate_samples = Vec::with_capacity(runs);
+    let mut snapshot_create_samples = Vec::with_capacity(runs);
+    let mut destroy_initial_samples = Vec::with_capacity(runs);
+    let mut restore_verify_samples = Vec::with_capacity(runs);
+    let mut destroy_restored_samples = Vec::with_capacity(runs);
+    let mut total_samples = Vec::with_capacity(runs);
+    let mut raw_runs = Vec::with_capacity(runs);
+
+    for i in 0..total_runs {
+        let run_number = i + 1;
+        let affinity_name = format!("benchsnap-{}", uuid::Uuid::new_v4().simple());
+        let mut created_sandbox_id: Option<SandboxId> = None;
+        let mut restored_sandbox_id: Option<SandboxId> = None;
+        let mut snapshot_id: Option<SnapshotId> = None;
+
+        let mut run_config = config.clone();
+        run_config.affinity_name = Some(affinity_name.clone());
+
+        let run_result: anyhow::Result<SnapshotBenchRun> = async {
+            let create_started = Instant::now();
+            let created_sandbox = client.create_sandbox(run_config).await?;
+            let create_ms = create_started.elapsed().as_millis();
+            created_sandbox_id = Some(created_sandbox.id.clone());
+
+            let mutate_started = Instant::now();
+            let mutate_outcome = client
+                .exec(
+                    &created_sandbox.id,
+                    ExecRequest {
+                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), mutate_cmd.clone()],
+                        timeout_secs,
+                    },
+                )
+                .await?;
+            if mutate_outcome.exit_code != 0 {
+                bail!(
+                    "snapshot benchmark mutate command failed (run={} sandbox_id={} exit={}): {}",
+                    run_number,
+                    created_sandbox.id.0,
+                    mutate_outcome.exit_code,
+                    mutate_outcome.stderr
+                );
+            }
+            let mutate_ms = mutate_started.elapsed().as_millis();
+
+            let snapshot_started = Instant::now();
+            let (created_snapshot_id, _) =
+                client.create_snapshot(&created_sandbox.id, None).await?;
+            let snapshot_create_ms = snapshot_started.elapsed().as_millis();
+            snapshot_id = Some(created_snapshot_id.clone());
+
+            let destroy_initial_started = Instant::now();
+            client.destroy_sandbox(&created_sandbox.id).await?;
+            created_sandbox_id = None;
+            let destroy_initial_ms = destroy_initial_started.elapsed().as_millis();
+
+            let restore_verify_started = Instant::now();
+            let (restored_sandbox, _) = client.resolve_affinity(&affinity_name, true).await?;
+            restored_sandbox_id = Some(restored_sandbox.id.clone());
+            let verify_outcome = client
+                .exec(
+                    &restored_sandbox.id,
+                    ExecRequest {
+                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), verify_cmd.clone()],
+                        timeout_secs,
+                    },
+                )
+                .await?;
+            if verify_outcome.exit_code != 0 {
+                bail!(
+                    "snapshot benchmark verify command failed (run={} sandbox_id={} exit={}): {}",
+                    run_number,
+                    restored_sandbox.id.0,
+                    verify_outcome.exit_code,
+                    verify_outcome.stderr
+                );
+            }
+            let restore_verify_ms = restore_verify_started.elapsed().as_millis();
+
+            let destroy_restored_started = Instant::now();
+            client.destroy_sandbox(&restored_sandbox.id).await?;
+            restored_sandbox_id = None;
+            let destroy_restored_ms = destroy_restored_started.elapsed().as_millis();
+
+            let total_ms = create_ms
+                + mutate_ms
+                + snapshot_create_ms
+                + destroy_initial_ms
+                + restore_verify_ms
+                + destroy_restored_ms;
+
+            Ok(SnapshotBenchRun {
+                run: run_number,
+                sandbox_id: created_sandbox.id.0.to_string(),
+                restored_sandbox_id: restored_sandbox.id.0.to_string(),
+                snapshot_id: created_snapshot_id.0.to_string(),
+                create_ms,
+                mutate_ms,
+                snapshot_create_ms,
+                destroy_initial_ms,
+                restore_verify_ms,
+                destroy_restored_ms,
+                total_ms,
+            })
+        }
+        .await;
+
+        if let Some(id) = restored_sandbox_id {
+            let _ = client.destroy_sandbox(&id).await;
+        }
+        if let Some(id) = created_sandbox_id {
+            let _ = client.destroy_sandbox(&id).await;
+        }
+        if !keep_snapshot_artifacts {
+            if let Some(id) = &snapshot_id {
+                let _ = cleanup_local_snapshot_artifact(id).await;
+            }
+        }
+
+        let mut run = run_result?;
+        if i >= warmup {
+            run.run = i - warmup + 1;
+            create_samples.push(run.create_ms);
+            mutate_samples.push(run.mutate_ms);
+            snapshot_create_samples.push(run.snapshot_create_ms);
+            destroy_initial_samples.push(run.destroy_initial_ms);
+            restore_verify_samples.push(run.restore_verify_ms);
+            destroy_restored_samples.push(run.destroy_restored_ms);
+            total_samples.push(run.total_ms);
+            raw_runs.push(run);
+        }
+    }
+
+    Ok(SnapshotBenchSummary {
+        runs,
+        warmup,
+        create_ms: summarize_snapshot_samples(create_samples),
+        mutate_ms: summarize_snapshot_samples(mutate_samples),
+        snapshot_create_ms: summarize_snapshot_samples(snapshot_create_samples),
+        destroy_initial_ms: summarize_snapshot_samples(destroy_initial_samples),
+        restore_verify_ms: summarize_snapshot_samples(restore_verify_samples),
+        destroy_restored_ms: summarize_snapshot_samples(destroy_restored_samples),
+        total_ms: summarize_snapshot_samples(total_samples),
+        raw_runs,
+    })
+}
+
 fn summarize_samples(mut samples: Vec<u128>, warmup: usize) -> BenchSummary {
     samples.sort_unstable();
     let runs = samples.len();
@@ -1404,6 +1677,58 @@ fn summarize_samples(mut samples: Vec<u128>, warmup: usize) -> BenchSummary {
         min_ms: samples.first().copied().unwrap_or_default(),
         max_ms: samples.last().copied().unwrap_or_default(),
     }
+}
+
+fn summarize_snapshot_samples(mut samples: Vec<u128>) -> SnapshotBenchStageSummary {
+    samples.sort_unstable();
+    let runs = samples.len();
+    let sum: u128 = samples.iter().copied().sum();
+    let mean_ms = if runs == 0 {
+        0.0
+    } else {
+        (sum as f64) / (runs as f64)
+    };
+
+    SnapshotBenchStageSummary {
+        mean_ms,
+        p50_ms: percentile(&samples, 50),
+        p95_ms: percentile(&samples, 95),
+        min_ms: samples.first().copied().unwrap_or_default(),
+        max_ms: samples.last().copied().unwrap_or_default(),
+    }
+}
+
+async fn cleanup_local_snapshot_artifact(snapshot_id: &SnapshotId) -> anyhow::Result<()> {
+    let root = if let Ok(value) = std::env::var("HYPERBOX_SNAPSHOT_ROOT") {
+        std::path::PathBuf::from(value)
+    } else if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home).join(".hyperbox/snapshots")
+    } else {
+        std::env::temp_dir().join("hyperbox/snapshots")
+    };
+    let artifact = root.join(format!("{}.tar.gz", snapshot_id.0));
+    if artifact.exists() {
+        tokio::fs::remove_file(artifact).await?;
+    }
+    Ok(())
+}
+
+fn print_snapshot_bench_summary(summary: &SnapshotBenchSummary) {
+    println!("runs={} warmup={}", summary.runs, summary.warmup);
+    print_snapshot_stage("create_ms", &summary.create_ms);
+    print_snapshot_stage("mutate_ms", &summary.mutate_ms);
+    print_snapshot_stage("snapshot_create_ms", &summary.snapshot_create_ms);
+    print_snapshot_stage("destroy_initial_ms", &summary.destroy_initial_ms);
+    print_snapshot_stage("restore_verify_ms", &summary.restore_verify_ms);
+    print_snapshot_stage("destroy_restored_ms", &summary.destroy_restored_ms);
+    print_snapshot_stage("total_ms", &summary.total_ms);
+}
+
+fn print_snapshot_stage(name: &str, stats: &SnapshotBenchStageSummary) {
+    println!(
+        "{} mean_ms={:.2} p50_ms={} p95_ms={} min_ms={} max_ms={}",
+        name, stats.mean_ms, stats.p50_ms, stats.p95_ms, stats.min_ms, stats.max_ms
+    );
 }
 
 fn percentile(values: &[u128], p: usize) -> u128 {
