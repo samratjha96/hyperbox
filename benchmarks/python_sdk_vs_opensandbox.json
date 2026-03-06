@@ -1,0 +1,53 @@
+{
+  "timestamp_utc": "2026-03-06T16:29:34Z",
+  "host": {
+    "platform": "darwin",
+    "workspace": "/Users/samratj/Documents/scratch/hyperbox"
+  },
+  "config": {
+    "runs": 20,
+    "warmup": 5,
+    "template": "python:3.12",
+    "command": "true"
+  },
+  "hyperbox_python_sdk": {
+    "cold_end_to_end": {
+      "runs": 20,
+      "warmup": 5,
+      "mean_ms": 906.09,
+      "p50_ms": 892.42,
+      "p95_ms": 970.82,
+      "min_ms": 824.08,
+      "max_ms": 1086.99
+    },
+    "warm_exec": {
+      "runs": 20,
+      "warmup": 5,
+      "mean_ms": 48.28,
+      "p50_ms": 47.95,
+      "p95_ms": 54.55,
+      "min_ms": 33.45,
+      "max_ms": 55.73
+    }
+  },
+  "opensandbox_python_sdk": {
+    "cold_end_to_end": {
+      "runs": 20,
+      "warmup": 5,
+      "mean_ms": 1607.62,
+      "p50_ms": 1625.43,
+      "p95_ms": 1648.08,
+      "min_ms": 1399.0,
+      "max_ms": 1659.48
+    },
+    "warm_exec": {
+      "runs": 20,
+      "warmup": 5,
+      "mean_ms": 1017.51,
+      "p50_ms": 1017.75,
+      "p95_ms": 1020.32,
+      "min_ms": 1009.56,
+      "max_ms": 1028.06
+    }
+  }
+}
