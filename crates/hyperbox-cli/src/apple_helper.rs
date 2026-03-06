@@ -283,6 +283,8 @@ impl AppleHelper {
         let args = vec![
             "run".to_string(),
             "--detach".to_string(),
+            "--progress".to_string(),
+            "none".to_string(),
             "--name".to_string(),
             container_name.to_string(),
             "--cpus".to_string(),
