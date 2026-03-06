@@ -86,4 +86,5 @@ Raw output is stored at `benchmarks/apples_to_apples.json`.
 
 - `network=allowlist` is treated as an enforce-or-fail feature.
 - Local backend rejects networked modes by default.
+- Apple backend supports `network=none` and `network=full`; `network=allowlist` is rejected until enforcement is implemented.
 - Firecracker requires firewall enforcement enabled (`HYPERBOX_NETWORK_DRY_RUN=0`).

@@ -21,13 +21,13 @@ Date: 2026-03-05
 3. Firecracker/Apple backends scaffolded with shared control API shape.
 4. Enforce-or-fail network gating:
    - Local backend rejects `allowlist/full` by default.
-   - Apple backend rejects networked modes.
+   - Apple backend supports `none/full` and rejects `allowlist` (enforce-or-fail).
    - Firecracker rejects networked modes when firewall is dry-run.
 5. Apple helper bridge protocol implemented in backend + docs.
 6. Built-in helper executable (`hyperbox apple-helper`) implemented for macOS `container` CLI:
    - persistent session lifecycle (`create`, `exec`, `read`, `write`, `destroy`)
    - workspace bind mount to `/workspace`
-   - `--network none` enforced for current backend policy
+   - network mode wiring for `none/full` (`allowlist` rejected)
 7. Apple backend now fails fast if helper is missing (`HYPERBOX_APPLE_HELPER` required).
 8. Auto backend selection on macOS only chooses Apple backend when helper is configured.
 9. Helper protocol integration test added (`hyperbox-cli/tests/apple_helper_integration.rs`).

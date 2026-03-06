@@ -22,7 +22,8 @@ Each response is one JSON object per line written to helper stdout.
 `hyperbox apple-helper` currently implements runtime operations through Apple `container` CLI:
 
 - `create` launches detached container with:
-  - `--network none`
+  - `--network none` when `network_mode=none`
+  - default runtime networking when `network_mode=full`
   - workspace bind mount to `/workspace`
   - deterministic container name `hyperbox-<sandbox_id>`
 - `exec` uses `container exec --workdir /workspace`
@@ -32,13 +33,14 @@ Each response is one JSON object per line written to helper stdout.
 Current limitation:
 - runtime `containerization` is implemented.
 - runtime `virtualization` returns an error (dedicated Virtualization.framework helper is not yet implemented).
+- `network_mode=allowlist` returns an error (allowlist enforcement not implemented yet).
 
 ## Requests
 
 ### Create
 
 ```json
-{"op":"create","sandbox_id":"...","template":"python:3.12","workspace_dir":"/path","runtime":"containerization"}
+{"op":"create","sandbox_id":"...","template":"python:3.12","workspace_dir":"/path","runtime":"containerization","network_mode":"none","network_allowlist":[]}
 ```
 
 ### Exec

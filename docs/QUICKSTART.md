@@ -100,7 +100,8 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 - Network allowlist is currently policy-evaluated in libraries; host firewall enforcement is planned for Linux/macOS backend integration.
 - Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
 - Firecracker backend maps each sandbox to `HYPERBOX_AGENT_ROOT/<sandbox-id>` for exec/file I/O. With `--workspace`, this path is linked to the provided workspace directory so agent operations run against the repo directly.
-- `network=allowlist` and `network=full` are rejected by LocalBackend and Apple backend unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`). This prevents false-positive security behavior.
+- LocalBackend rejects `network=allowlist` and `network=full` unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`).
+- Apple backend supports `network=none` and `network=full`; `network=allowlist` is rejected (enforce-or-fail until allowlist enforcement is implemented).
 - Firecracker agent auto-start can be disabled via `HYPERBOX_AGENT_AUTOSTART=0` (then `HYPERBOX_AGENT_ENDPOINT` must already be serving).
 - On macOS, backend runtime selection can be forced with `HYPERBOX_APPLE_RUNTIME=containerization|virtualization`; auto mode prefers containerization only when available on host.
 - Apple backend supports a helper bridge command (`HYPERBOX_APPLE_HELPER`) for native runtime integration; protocol is documented in `docs/APPLE_HELPER_PROTOCOL.md`.
