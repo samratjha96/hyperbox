@@ -60,15 +60,15 @@ Measured on **March 6, 2026** on **macOS 26.3 (Apple Silicon)** with:
 
 | Command | mean | p50 | p95 |
 | --- | ---:| ---:| ---:|
-| `hyperbox run --template python:3.12 --workspace "$PWD" --cmd "true"` | 902.84 ms | 916.45 ms | 963.92 ms |
-| `docker run --rm --pull=never --network none --workdir /workspace -v "$PWD:/workspace" python:3.12 /bin/sh -lc true` | 115.38 ms | 113.77 ms | 126.12 ms |
+| `hyperbox run --template python:3.12 --workspace "$PWD" --cmd "true"` | 845.10 ms | 835.27 ms | 886.31 ms |
+| `docker run --rm --pull=never --network none --workdir /workspace -v "$PWD:/workspace" python:3.12 /bin/sh -lc true` | 107.94 ms | 107.26 ms | 114.17 ms |
 
 ### Warm Exec (reused sandbox/container)
 
 | Command | mean | p50 | p95 |
 | --- | ---:| ---:| ---:|
-| `hyperbox run --sandbox-id <id> --cmd "true"` | 82.39 ms | 80.16 ms | 97.74 ms |
-| `docker exec <container> /bin/sh -lc true` | 43.59 ms | 43.00 ms | 52.00 ms |
+| `hyperbox run --sandbox-id <id> --cmd "true"` | 58.44 ms | 57.54 ms | 63.28 ms |
+| `docker exec <container> /bin/sh -lc true` | 43.13 ms | 42.49 ms | 48.40 ms |
 
 ### Reproduce
 

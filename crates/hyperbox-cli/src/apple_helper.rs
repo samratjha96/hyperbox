@@ -52,6 +52,8 @@ enum HelperRequest {
         template: String,
         workspace_dir: Option<String>,
         runtime: String,
+        memory_mb: Option<u32>,
+        vcpu_count: Option<u32>,
     },
     Exec {
         sandbox_id: String,
@@ -149,9 +151,18 @@ impl AppleHelper {
                 template,
                 workspace_dir,
                 runtime,
+                memory_mb,
+                vcpu_count,
             } => {
-                self.create_sandbox(sandbox_id, template, workspace_dir, runtime)
-                    .await
+                self.create_sandbox(
+                    sandbox_id,
+                    template,
+                    workspace_dir,
+                    runtime,
+                    memory_mb,
+                    vcpu_count,
+                )
+                .await
             }
             HelperRequest::Exec {
                 sandbox_id,
@@ -181,6 +192,8 @@ impl AppleHelper {
         template: String,
         workspace_dir: Option<String>,
         runtime: String,
+        memory_mb: Option<u32>,
+        vcpu_count: Option<u32>,
     ) -> anyhow::Result<HelperResponse> {
         let started = Instant::now();
         let sandbox_id = sanitize_sandbox_id(&sandbox_id)?;
@@ -223,13 +236,19 @@ impl AppleHelper {
             workspace
         };
         let container_name = format!("hyperbox-{}", sandbox_id);
-        self.start_container(&container_name, &template, &workspace_host)
-            .await
-            .with_context(|| {
-                format!(
-                    "start container runtime for sandbox `{sandbox_id}` using template `{template}`"
-                )
-            })?;
+        self.start_container(
+            &container_name,
+            &template,
+            &workspace_host,
+            memory_mb,
+            vcpu_count,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "start container runtime for sandbox `{sandbox_id}` using template `{template}`"
+            )
+        })?;
 
         self.sandboxes.insert(
             sandbox_id.clone(),
@@ -255,13 +274,21 @@ impl AppleHelper {
         container_name: &str,
         template: &str,
         workspace_host: &Path,
+        memory_mb: Option<u32>,
+        vcpu_count: Option<u32>,
     ) -> anyhow::Result<()> {
+        let cpus = vcpu_count.unwrap_or(1).max(1);
+        let memory_mb = memory_mb.unwrap_or(512).max(1);
         let mount = format!("{}:{}", workspace_host.display(), WORKDIR_IN_CONTAINER);
         let args = vec![
             "run".to_string(),
             "--detach".to_string(),
             "--name".to_string(),
             container_name.to_string(),
+            "--cpus".to_string(),
+            cpus.to_string(),
+            "--memory".to_string(),
+            format!("{memory_mb}M"),
             "--network".to_string(),
             "none".to_string(),
             "--workdir".to_string(),

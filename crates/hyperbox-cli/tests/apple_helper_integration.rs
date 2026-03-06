@@ -76,7 +76,7 @@ def cmd_run(argv):
         if arg in ("--detach",):
             i += 1
             continue
-        if arg in ("--network", "--workdir"):
+        if arg in ("--network", "--workdir", "--cpus", "--memory"):
             i += 2
             continue
         break

@@ -58,6 +58,8 @@ enum HelperRequest {
         template: String,
         workspace_dir: Option<String>,
         runtime: String,
+        memory_mb: Option<u32>,
+        vcpu_count: Option<u32>,
     },
     Exec {
         sandbox_id: String,
@@ -247,6 +249,8 @@ impl SandboxBackend for AppleVzBackend {
                     template: config.template.clone(),
                     workspace_dir: config.workspace_dir.clone(),
                     runtime: self.runtime_name().to_string(),
+                    memory_mb: Some(config.memory_mb),
+                    vcpu_count: Some(config.vcpu_count as u32),
                 })
                 .await?;
             debug!(
