@@ -115,12 +115,7 @@ impl AppleHelperSession {
         serde_json::from_str(line.trim_end()).map_err(HyperboxError::Serde)
     }
 
-    async fn shutdown(&mut self, sandbox_id: &SandboxId) -> Result<()> {
-        let _ = self
-            .request(&HelperRequest::Destroy {
-                sandbox_id: sandbox_id.0.to_string(),
-            })
-            .await;
+    async fn terminate(&mut self) -> Result<()> {
         self.child
             .kill()
             .await
@@ -132,13 +127,13 @@ impl AppleHelperSession {
 struct AppleSandbox {
     info: SandboxInfo,
     config: SandboxConfig,
-    helper: Option<AppleHelperSession>,
 }
 
 #[derive(Clone)]
 pub struct AppleVzBackend {
     config: AppleBackendConfig,
     sandboxes: Arc<Mutex<HashMap<SandboxId, AppleSandbox>>>,
+    helper_session: Arc<Mutex<Option<AppleHelperSession>>>,
 }
 
 impl AppleVzBackend {
@@ -146,6 +141,7 @@ impl AppleVzBackend {
         Self {
             config,
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
+            helper_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -156,22 +152,23 @@ impl AppleVzBackend {
         }
     }
 
-    async fn start_helper_if_needed(
-        &self,
-        sandbox_id: &SandboxId,
-    ) -> Result<Option<AppleHelperSession>> {
+    async fn ensure_helper_session(&self) -> Result<()> {
         let Some(command) = &self.config.launch_command else {
-            return Ok(None);
+            return Ok(());
         };
+        let mut session = self.helper_session.lock().await;
+        if session.is_some() {
+            return Ok(());
+        }
         if command.is_empty() {
             return Err(HyperboxError::InvalidConfig(
                 "apple launch command is empty".to_string(),
             ));
         }
 
+        let spawn_started = std::time::Instant::now();
         let mut cmd = tokio::process::Command::new(&command[0]);
         cmd.args(&command[1..]);
-        cmd.env("HYPERBOX_SANDBOX_ID", sandbox_id.0.to_string());
         cmd.current_dir(&self.config.work_dir);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
@@ -189,12 +186,36 @@ impl AppleVzBackend {
         })?;
         let stderr = child.stderr.take();
 
-        Ok(Some(AppleHelperSession {
+        *session = Some(AppleHelperSession {
             child,
             stdin,
             stdout: BufReader::new(stdout),
             _stderr: stderr,
-        }))
+        });
+        info!(
+            stage = "helper_spawn",
+            elapsed_ms = spawn_started.elapsed().as_millis() as u64,
+            "apple helper process spawned"
+        );
+        Ok(())
+    }
+
+    async fn helper_request(&self, request: &HelperRequest) -> Result<HelperResponse> {
+        self.ensure_helper_session().await?;
+        let mut session = self.helper_session.lock().await;
+        let helper = session.as_mut().ok_or_else(|| {
+            HyperboxError::InvalidConfig("apple helper session is not available".to_string())
+        })?;
+        match helper.request(request).await {
+            Ok(response) => Ok(response),
+            Err(err) => {
+                warn!(error = %err, "apple helper request failed, resetting helper session");
+                if let Some(mut helper) = session.take() {
+                    let _ = helper.terminate().await;
+                }
+                Err(err)
+            }
+        }
     }
 }
 
@@ -240,11 +261,10 @@ impl SandboxBackend for AppleVzBackend {
             created_at: Utc::now(),
         };
 
-        let mut helper = self.start_helper_if_needed(&id).await?;
-        if let Some(helper_session) = helper.as_mut() {
+        if self.config.launch_command.is_some() {
             let helper_create_started = std::time::Instant::now();
-            let response = helper_session
-                .request(&HelperRequest::Create {
+            let response = self
+                .helper_request(&HelperRequest::Create {
                     sandbox_id: id.0.to_string(),
                     template: config.template.clone(),
                     workspace_dir: config.workspace_dir.clone(),
@@ -279,7 +299,6 @@ impl SandboxBackend for AppleVzBackend {
             AppleSandbox {
                 info: info.clone(),
                 config,
-                helper,
             },
         );
         info!(
@@ -298,15 +317,14 @@ impl SandboxBackend for AppleVzBackend {
         req: hyperbox_core::ExecRequest,
     ) -> Result<hyperbox_core::ExecOutcome> {
         let exec_started = std::time::Instant::now();
-        let mut sandboxes = self.sandboxes.lock().await;
-        let sandbox = sandboxes
-            .get_mut(sandbox_id)
-            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+        if self.sandboxes.lock().await.get(sandbox_id).is_none() {
+            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+        }
 
-        if let Some(helper) = sandbox.helper.as_mut() {
+        if self.config.launch_command.is_some() {
             let helper_exec_started = std::time::Instant::now();
-            match helper
-                .request(&HelperRequest::Exec {
+            match self
+                .helper_request(&HelperRequest::Exec {
                     sandbox_id: sandbox_id.0.to_string(),
                     command: req.command,
                     timeout_secs: req.timeout_secs,
@@ -376,14 +394,13 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
-        let mut sandboxes = self.sandboxes.lock().await;
-        let sandbox = sandboxes
-            .get_mut(sandbox_id)
-            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+        if self.sandboxes.lock().await.get(sandbox_id).is_none() {
+            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+        }
 
-        if let Some(helper) = sandbox.helper.as_mut() {
-            match helper
-                .request(&HelperRequest::Read {
+        if self.config.launch_command.is_some() {
+            match self
+                .helper_request(&HelperRequest::Read {
                     sandbox_id: sandbox_id.0.to_string(),
                     path: path.to_string(),
                 })
@@ -429,14 +446,13 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
-        let mut sandboxes = self.sandboxes.lock().await;
-        let sandbox = sandboxes
-            .get_mut(sandbox_id)
-            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+        if self.sandboxes.lock().await.get(sandbox_id).is_none() {
+            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+        }
 
-        if let Some(helper) = sandbox.helper.as_mut() {
-            match helper
-                .request(&HelperRequest::Write {
+        if self.config.launch_command.is_some() {
+            match self
+                .helper_request(&HelperRequest::Write {
                     sandbox_id: sandbox_id.0.to_string(),
                     path: payload.path.to_string(),
                     bytes_b64: BASE64.encode(payload.bytes),
@@ -473,19 +489,24 @@ impl SandboxBackend for AppleVzBackend {
 
     async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
         let destroy_started = std::time::Instant::now();
-        let mut sandbox = self
+        let _sandbox = self
             .sandboxes
             .lock()
             .await
             .remove(sandbox_id)
             .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
 
-        if let Some(helper) = sandbox.helper.as_mut() {
-            if let Err(err) = helper.shutdown(sandbox_id).await {
+        if self.config.launch_command.is_some() {
+            if let Err(err) = self
+                .helper_request(&HelperRequest::Destroy {
+                    sandbox_id: sandbox_id.0.to_string(),
+                })
+                .await
+            {
                 warn!(
                     sandbox_id = %sandbox_id.0,
                     error = %err,
-                    "apple backend failed to shutdown helper cleanly"
+                    "apple backend failed to destroy sandbox via helper"
                 );
                 return Err(err);
             }
