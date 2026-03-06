@@ -47,35 +47,40 @@ See `docs/ARCHITECTURE.md` and `docs/QUICKSTART.md` for more detail.
 
 ## Benchmarks
 
-Measured on **March 5, 2026** on **macOS 26.3 (Apple Silicon)** with:
+Measured on **March 6, 2026** on **macOS 26.3 (Apple Silicon)** with:
 - `target/release/hyperbox`
 - Apple backend (`HYPERBOX_BACKEND=auto`, `HYPERBOX_APPLE_RUNTIME=containerization`)
-- pre-pulled `alpine:3.20` for Docker comparison
-- 30 measured runs, 5 warmup runs
+- image: `python:3.12` on both sides
+- command: `true` on both sides (`/bin/sh -lc true` for Docker)
+- same workspace mount (`$PWD -> /workspace`) on both sides
+- `network none` on both sides
+- 20 measured runs, 5 warmup runs
 
-### End-to-end startup (new sandbox/container each run)
-
-| Command | mean | p50 | p95 |
-| --- | ---:| ---:| ---:|
-| `hyperbox shell --shell /bin/true --workspace "$PWD"` | 981.66 ms | 971.65 ms | 1084.58 ms |
-| `docker run --rm --pull=never alpine:3.20 true` | 204.92 ms | 199.03 ms | 272.46 ms |
-
-### Steady-state exec (reused sandbox/container)
+### Cold End-To-End (new sandbox/container each run)
 
 | Command | mean | p50 | p95 |
 | --- | ---:| ---:| ---:|
-| `hyperbox shell --sandbox-id <id> --shell /bin/true` | 75.57 ms | 71.31 ms | 100.88 ms |
-| `docker exec <container> true` | 45.57 ms | 44.67 ms | 52.48 ms |
+| `hyperbox run --template python:3.12 --workspace "$PWD" --cmd "true"` | 902.84 ms | 916.45 ms | 963.92 ms |
+| `docker run --rm --pull=never --network none --workdir /workspace -v "$PWD:/workspace" python:3.12 /bin/sh -lc true` | 115.38 ms | 113.77 ms | 126.12 ms |
+
+### Warm Exec (reused sandbox/container)
+
+| Command | mean | p50 | p95 |
+| --- | ---:| ---:| ---:|
+| `hyperbox run --sandbox-id <id> --cmd "true"` | 82.39 ms | 80.16 ms | 97.74 ms |
+| `docker exec <container> /bin/sh -lc true` | 43.59 ms | 43.00 ms | 52.00 ms |
 
 ### Reproduce
 
 ```bash
-# Hyperbox (ephemeral)
-./target/release/hyperbox shell --shell /bin/true --workspace "$PWD"
-
-# Docker baseline (smallest practical image)
-docker run --rm --pull=never alpine:3.20 true
+python scripts/benchmark_apples_to_apples.py \
+  --runs 20 \
+  --warmup 5 \
+  --hyperbox-bin ./target/release/hyperbox \
+  --output benchmarks/apples_to_apples.json
 ```
+
+Raw output is stored at `benchmarks/apples_to_apples.json`.
 
 ## Network Policy Enforcement
 
