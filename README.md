@@ -40,7 +40,8 @@ cargo run -p hyperbox-cli -- destroy --sandbox-id <sandbox-id>
 cargo run -p hyperbox-cli -- proxy --workspace "$PWD"
 cargo run -p hyperbox-server
 cargo run -p hyperbox-agent --bin hyperbox-agentd
-cargo run -p hyperbox-cli -- --server-url http://127.0.0.1:50051 bench --template python:3.12 --cmd "python3 -c 'print(1)'" --json
+cargo run -p hyperbox-cli -- --server-url http://127.0.0.1:50051 bench exec --template python:3.12 --cmd "python3 -c 'print(1)'" --json
+cargo run -p hyperbox-cli -- --server-url http://127.0.0.1:50051 bench snapshot --template python:3.12 --runs 5 --warmup 1 --timeout 240 --json
 ```
 
 See `docs/ARCHITECTURE.md` and `docs/QUICKSTART.md` for more detail.
@@ -81,6 +82,38 @@ python scripts/benchmark_apples_to_apples.py \
 ```
 
 Raw output is stored at `benchmarks/apples_to_apples.json`.
+
+### Snapshot Lifecycle Benchmark
+
+Benchmark full affinity snapshot flow:
+- `create`
+- mutate state
+- `snapshot create`
+- destroy
+- restore via affinity (`run --name ...`)
+- verify + destroy
+
+```bash
+./target/release/hyperbox --server-url http://127.0.0.1:50051 \
+  bench snapshot \
+  --template python:3.12 \
+  --runs 5 \
+  --warmup 1 \
+  --timeout 240 \
+  --json > benchmarks/snapshot_lifecycle_bench.json
+```
+
+Observed on March 6, 2026 (Apple backend, containerization runtime, 5 runs):
+
+| Stage | p50 |
+| --- | ---: |
+| create | 663.95 ms |
+| mutate | 50.93 ms |
+| snapshot create | 27.71 s |
+| destroy (initial) | 290.96 ms |
+| restore + verify | 7.03 s |
+| destroy (restored) | 942.70 ms |
+| total | 36.85 s |
 
 ## Network Policy Enforcement
 
