@@ -160,7 +160,7 @@ $HB shell --sandbox-id "$SANDBOX_ID"
 
 Notes:
 - `shell` without `--sandbox-id` creates a temporary sandbox and destroys it after the shell exits.
-- `shell` is supported for Apple backend sandboxes (built-in helper path) and Firecracker backend sandboxes (agent stream path).
+- `shell` uses backend-specific transport: built-in Apple helper uses `container exec`, while Firecracker and Apple external-helper setups use agent shell streaming.
 
 ## Run in proxy mode for agent adapters
 

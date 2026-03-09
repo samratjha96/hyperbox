@@ -18,8 +18,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
 use hyperbox_core::config::normalize_allowlist_domains;
+use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
 use hyperbox_proto::hyperbox::v1::{
     self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
 };
@@ -1846,10 +1846,12 @@ async fn open_shell_with_client(
     }
 
     if !helper_argv_is_builtin_apple_helper(&server_info.apple_helper_argv) {
-        bail!(
-            "interactive shell is currently supported only for built-in apple helper sessions; active helper command is `{}`",
-            server_info.apple_helper_argv.join(" ")
-        );
+        return open_shell_via_agent_stream(sandbox_id, shell).await.with_context(|| {
+            format!(
+                "interactive shell for apple backend with external helper `{}` requires agent stream connectivity (set HYPERBOX_AGENT_ENDPOINT if non-default)",
+                server_info.apple_helper_argv.join(" ")
+            )
+        });
     }
 
     let container_bin = extract_container_bin_from_helper_argv(&server_info.apple_helper_argv)

@@ -17,11 +17,11 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+use hyperbox_core::config::normalize_allowlist_domains;
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
     SandboxInfo, SandboxLease, SandboxState, SnapshotId,
 };
-use hyperbox_core::config::normalize_allowlist_domains;
 use hyperbox_network::{
     CommandExecutor, FirewallManager, NetworkPolicyEvaluator, RecordingExecutor, ShellExecutor,
     VmNetworkSpec, build_allowlist_population_plan,
@@ -337,8 +337,7 @@ fn create_symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
 }
 
 async fn resolve_allowlist_ips(domains: &[String]) -> Result<Vec<IpAddr>> {
-    let domains = normalize_allowlist_domains(domains)
-        .map_err(HyperboxError::InvalidConfig)?;
+    let domains = normalize_allowlist_domains(domains).map_err(HyperboxError::InvalidConfig)?;
     let mut resolved = BTreeSet::new();
     for domain in domains {
         let entries = tokio::net::lookup_host((domain.as_str(), 443))

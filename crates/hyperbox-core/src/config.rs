@@ -32,7 +32,9 @@ pub fn normalize_allowlist_domains(domains: &[String]) -> std::result::Result<Ve
             return Err("allowlist domains must be non-empty".to_string());
         }
         if domain.contains('*') {
-            return Err("wildcard allowlist entries are not supported; use explicit domains".to_string());
+            return Err(
+                "wildcard allowlist entries are not supported; use explicit domains".to_string(),
+            );
         }
         if domain.contains('/') || domain.contains(':') || domain.contains(char::is_whitespace) {
             return Err(format!(
