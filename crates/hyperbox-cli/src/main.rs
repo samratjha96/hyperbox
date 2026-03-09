@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
+use hyperbox_core::config::normalize_allowlist_domains;
 use hyperbox_proto::hyperbox::v1::{
     self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
 };
@@ -87,7 +88,7 @@ enum Command {
         #[arg(
             long = "allow",
             value_name = "DOMAIN",
-            help = "Allowlisted domain (repeat for multiple domains, only with allowlist mode)"
+            help = "Allowlisted domain (exact hostname; repeat for multiple domains, only with allowlist mode)"
         )]
         allow: Vec<String>,
         #[arg(
@@ -157,7 +158,7 @@ enum Command {
         #[arg(
             long = "allow",
             value_name = "DOMAIN",
-            help = "Allowlisted domain (repeat for multiple domains, only with allowlist mode)"
+            help = "Allowlisted domain (exact hostname; repeat for multiple domains, only with allowlist mode)"
         )]
         allow: Vec<String>,
         #[arg(
@@ -261,7 +262,7 @@ enum Command {
             long = "allow",
             value_name = "DOMAIN",
             conflicts_with = "sandbox_id",
-            help = "Allowlisted domain for ephemeral shell creation"
+            help = "Allowlisted domain for ephemeral shell creation (exact hostname)"
         )]
         allow: Vec<String>,
         #[arg(
@@ -312,7 +313,7 @@ enum Command {
         #[arg(
             long = "allow",
             value_name = "DOMAIN",
-            help = "Allowlisted domain (repeat for multiple domains, only with allowlist mode)"
+            help = "Allowlisted domain (exact hostname; repeat for multiple domains, only with allowlist mode)"
         )]
         allow: Vec<String>,
         #[arg(long, default_value_t = 60, help = "Default exec timeout in seconds")]
@@ -1353,6 +1354,11 @@ fn resolve_network_policy(
         bail!(
             "allowlist mode requires at least one domain (via --allow or profile default allowlist)"
         );
+    }
+
+    if let NetworkMode::Allowlist(domains) = &mut resolved.network_mode {
+        *domains = normalize_allowlist_domains(domains)
+            .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?;
     }
 
     Ok(resolved)
@@ -2864,6 +2870,34 @@ mod tests {
         let err = resolve_network_policy(None, Some(NetworkArg::Allowlist), vec![], None)
             .expect_err("empty allowlist should fail");
         assert!(err.to_string().contains("at least one domain"));
+    }
+
+    #[test]
+    fn resolve_network_policy_rejects_wildcard_allowlist_entries() {
+        let err = resolve_network_policy(
+            None,
+            Some(NetworkArg::Allowlist),
+            vec!["*.example.com".to_string()],
+            None,
+        )
+        .expect_err("wildcards must be rejected");
+        assert!(err.to_string().contains("wildcard"));
+    }
+
+    #[test]
+    fn resolve_network_policy_normalizes_allowlist_entries() {
+        let resolved = resolve_network_policy(
+            None,
+            Some(NetworkArg::Allowlist),
+            vec!["Example.com".to_string(), "example.com".to_string()],
+            None,
+        )
+        .expect("allowlist should normalize");
+        let domains = match resolved.network_mode {
+            NetworkMode::Allowlist(domains) => domains,
+            other => panic!("expected allowlist mode, got {other:?}"),
+        };
+        assert_eq!(domains, vec!["example.com".to_string()]);
     }
 
     #[test]

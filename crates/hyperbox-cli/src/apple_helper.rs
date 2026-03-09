@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use hyperbox_core::config::normalize_allowlist_domains;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -52,11 +53,7 @@ def allows(host):
     if not host:
         return False
     for entry in ALLOWLIST:
-        if entry.startswith("*."):
-            suffix = entry[2:]
-            if host.endswith("." + suffix):
-                return True
-        elif host == entry:
+        if host == entry:
             return True
     return False
 
@@ -998,7 +995,11 @@ impl HelperNetworkMode {
         match raw_mode.to_ascii_lowercase().as_str() {
             "none" => Ok(Self::None),
             "full" => Ok(Self::Full),
-            "allowlist" => Ok(Self::Allowlist(allowlist)),
+            "allowlist" => {
+                let normalized = normalize_allowlist_domains(&allowlist)
+                    .map_err(|msg| anyhow!("invalid allowlist: {msg}"))?;
+                Ok(Self::Allowlist(normalized))
+            }
             other => bail!("unknown network mode `{other}`"),
         }
     }
@@ -1163,5 +1164,12 @@ mod tests {
                 "192.168.64.10".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn helper_network_parser_rejects_wildcard_allowlist_entries() {
+        let err = HelperNetworkMode::parse("allowlist", vec!["*.example.com".to_string()])
+            .expect_err("wildcards must be rejected");
+        assert!(err.to_string().contains("wildcard"));
     }
 }

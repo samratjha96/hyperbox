@@ -195,6 +195,7 @@ python -c "from hyperbox import Sandbox; print(Sandbox().run_python('print(42)')
 ## Caveats
 
 - Apple built-in helper enforces `network=allowlist` via sandbox-scoped DNS allowlist sidecar (domain-based enforcement). Host-level direct-IP firewall enforcement is planned.
+- Allowlist entries must be explicit hostnames (for example `example.com`); wildcard entries like `*.example.com` are rejected.
 - Workspace mode (`--workspace`) maps the sandbox working directory to an existing host directory (for agent-style repo workflows).
 - Firecracker backend maps each sandbox to `HYPERBOX_AGENT_ROOT/<sandbox-id>` for exec/file I/O. With `--workspace`, this path is linked to the provided workspace directory so agent operations run against the repo directly.
 - LocalBackend rejects `network=allowlist` and `network=full` unless explicitly bypassed for local dev (`HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK=1`).
