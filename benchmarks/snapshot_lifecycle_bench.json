@@ -1,0 +1,121 @@
+{
+  "runs": 5,
+  "stage_summary": {
+    "create_s": {
+      "mean_s": 0.708500825392548,
+      "median_s": 0.6639485419727862,
+      "min_s": 0.6236284589977004,
+      "max_s": 0.9483275840175338,
+      "p95_s": 0.6698708749609068
+    },
+    "mutate_s": {
+      "mean_s": 0.06827678338158875,
+      "median_s": 0.05092783400323242,
+      "min_s": 0.04723187495255843,
+      "max_s": 0.13776570797199383,
+      "p95_s": 0.057065291970502585
+    },
+    "snapshot_create_s": {
+      "mean_s": 27.676353450200985,
+      "median_s": 27.706877791963052,
+      "min_s": 27.488306500017643,
+      "max_s": 27.91549154202221,
+      "p95_s": 27.77348604198778
+    },
+    "destroy_initial_s": {
+      "mean_s": 0.28823833339847627,
+      "median_s": 0.29095779097406194,
+      "min_s": 0.2538847090327181,
+      "max_s": 0.3153002089820802,
+      "p95_s": 0.30026820802595466
+    },
+    "restore_verify_s": {
+      "mean_s": 7.117228866601363,
+      "median_s": 7.028495208011009,
+      "min_s": 6.974924125010148,
+      "max_s": 7.382671749975998,
+      "p95_s": 7.1772676249966025
+    },
+    "destroy_restored_s": {
+      "mean_s": 1.1036310498020612,
+      "median_s": 0.9427027910132892,
+      "min_s": 0.683433958038222,
+      "max_s": 1.7665241659851745,
+      "p95_s": 1.1991049170028418
+    },
+    "total_s": {
+      "mean_s": 36.962229308777026,
+      "median_s": 36.84774608298903,
+      "min_s": 36.677724749955814,
+      "max_s": 37.449114082905,
+      "p95_s": 36.99211458506761
+    }
+  },
+  "raw_runs": [
+    {
+      "run": 1,
+      "sandbox_id": "fcff41f1-289d-47cb-b56d-76092b9fb958",
+      "snapshot_id": "607c5a29-6141-4871-87ad-83560eb5a469",
+      "restore_output": "root-state\nworkspace-state",
+      "create_s": 0.9483275840175338,
+      "mutate_s": 0.05092783400323242,
+      "snapshot_create_s": 27.77348604198778,
+      "destroy_initial_s": 0.2538847090327181,
+      "restore_verify_s": 7.022785625013057,
+      "destroy_restored_s": 0.9427027910132892,
+      "total_s": 36.99211458506761
+    },
+    {
+      "run": 2,
+      "sandbox_id": "4c3b65a6-146d-4070-ab1a-28f101b92fe1",
+      "snapshot_id": "d32ac4c5-922b-4d01-a1f4-9d413347564b",
+      "restore_output": "root-state\nworkspace-state",
+      "create_s": 0.6639485419727862,
+      "mutate_s": 0.04839320800965652,
+      "snapshot_create_s": 27.91549154202221,
+      "destroy_initial_s": 0.3153002089820802,
+      "restore_verify_s": 6.974924125010148,
+      "destroy_restored_s": 0.9263894169707783,
+      "total_s": 36.84444704296766
+    },
+    {
+      "run": 3,
+      "sandbox_id": "6760a210-20a9-4f35-9883-8c02aeae4407",
+      "snapshot_id": "011d1995-08f9-45b8-be1f-b5cccaec0a3f",
+      "restore_output": "root-state\nworkspace-state",
+      "create_s": 0.6367286670138128,
+      "mutate_s": 0.13776570797199383,
+      "snapshot_create_s": 27.706877791963052,
+      "destroy_initial_s": 0.30026820802595466,
+      "restore_verify_s": 7.382671749975998,
+      "destroy_restored_s": 0.683433958038222,
+      "total_s": 36.84774608298903
+    },
+    {
+      "run": 4,
+      "sandbox_id": "cd0a602a-2681-43d0-af18-33a6779b1c8d",
+      "snapshot_id": "add2d580-368d-4944-bb4e-b6aa6dbd0eff",
+      "restore_output": "root-state\nworkspace-state",
+      "create_s": 0.6236284589977004,
+      "mutate_s": 0.04723187495255843,
+      "snapshot_create_s": 27.488306500017643,
+      "destroy_initial_s": 0.29095779097406194,
+      "restore_verify_s": 7.028495208011009,
+      "destroy_restored_s": 1.1991049170028418,
+      "total_s": 36.677724749955814
+    },
+    {
+      "run": 5,
+      "sandbox_id": "b2c6a422-d27e-44eb-803a-49b4d1e468b4",
+      "snapshot_id": "4a404340-ee3b-4328-abb3-8e3ad71a7cf0",
+      "restore_output": "root-state\nworkspace-state",
+      "create_s": 0.6698708749609068,
+      "mutate_s": 0.057065291970502585,
+      "snapshot_create_s": 27.497605375014246,
+      "destroy_initial_s": 0.2807807499775663,
+      "restore_verify_s": 7.1772676249966025,
+      "destroy_restored_s": 1.7665241659851745,
+      "total_s": 37.449114082905
+    }
+  ]
+}
