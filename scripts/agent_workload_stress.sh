@@ -308,12 +308,24 @@ if [[ $RESET -eq 1 ]]; then
   "$HB_BIN" destroy --name "$SANDBOX_NAME" >/dev/null 2>&1 || true
 fi
 
-if "$HB_BIN" list --json | python3 - "$SANDBOX_NAME" <<'PY' >/dev/null
+LIST_JSON="[]"
+if RAW_LIST_JSON="$("$HB_BIN" list --json 2>/dev/null)"; then
+  LIST_JSON="$RAW_LIST_JSON"
+fi
+
+if HB_LIST_JSON="$LIST_JSON" python3 - "$SANDBOX_NAME" <<'PY' >/dev/null
 import json
+import os
 import sys
 
 target = sys.argv[1]
-for item in json.load(sys.stdin):
+raw = os.environ.get("HB_LIST_JSON", "[]")
+try:
+    sandboxes = json.loads(raw)
+except json.JSONDecodeError:
+    sandboxes = []
+
+for item in sandboxes:
     if item.get("affinity_name") == target:
         raise SystemExit(0)
 raise SystemExit(1)
