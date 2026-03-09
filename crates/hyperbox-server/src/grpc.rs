@@ -177,6 +177,24 @@ impl HyperboxControl for GrpcControlService {
         }))
     }
 
+    async fn list_sandboxes(
+        &self,
+        _request: Request<pb::ListSandboxesRequest>,
+    ) -> Result<Response<pb::ListSandboxesResponse>, Status> {
+        debug!("grpc list_sandboxes request");
+        let sandboxes = self
+            .runtime
+            .list_sandboxes()
+            .await
+            .into_iter()
+            .map(|row| pb::ActiveSandboxInfo {
+                info: Some(into_proto_info(row.info)),
+                affinity_name: row.affinity_name.unwrap_or_default(),
+            })
+            .collect();
+        Ok(Response::new(pb::ListSandboxesResponse { sandboxes }))
+    }
+
     async fn exec(
         &self,
         request: Request<pb::ExecRequest>,

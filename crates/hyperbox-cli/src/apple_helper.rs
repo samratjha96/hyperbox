@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -18,6 +19,102 @@ use tracing::{debug, info, warn};
 const WORKDIR_IN_CONTAINER: &str = "/workspace";
 const DEFAULT_IO_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DESTROY_TIMEOUT_SECS: u64 = 30;
+const ALLOWLIST_NETWORK_PREFIX: &str = "hyperbox-net-";
+const ALLOWLIST_DNS_PREFIX: &str = "hyperbox-dns-";
+const ALLOWLIST_DNS_TEMPLATE: &str = "python:3.12";
+const ALLOWLIST_DNS_BOOTSTRAP: &str =
+    "import base64,os;exec(base64.b64decode(os.environ['HB_DNS_SCRIPT_B64']).decode('utf-8'))";
+const ALLOWLIST_DNS_SCRIPT: &str = r#"import base64
+import json
+import os
+import socket
+
+
+def load_allowlist():
+    raw = os.environ.get("HB_ALLOWLIST_B64", "")
+    if not raw:
+        return []
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        values = json.loads(decoded)
+    except Exception:
+        return []
+    return [str(v).lower() for v in values if isinstance(v, str) and v]
+
+
+ALLOWLIST = load_allowlist()
+UPSTREAM = os.environ.get("HB_DNS_UPSTREAM", "1.1.1.1")
+UPSTREAM_ADDR = (UPSTREAM, 53)
+
+
+def allows(host):
+    host = host.lower()
+    if not host:
+        return False
+    for entry in ALLOWLIST:
+        if entry.startswith("*."):
+            suffix = entry[2:]
+            if host.endswith("." + suffix):
+                return True
+        elif host == entry:
+            return True
+    return False
+
+
+def parse_qname(packet):
+    if len(packet) < 12:
+        return ""
+    idx = 12
+    labels = []
+    while idx < len(packet):
+        length = packet[idx]
+        idx += 1
+        if length == 0:
+            break
+        if idx + length > len(packet):
+            return ""
+        labels.append(packet[idx:idx + length].decode("ascii", "ignore"))
+        idx += length
+    return ".".join(labels).lower()
+
+
+def nxdomain(packet):
+    if len(packet) < 12:
+        return packet
+    qdcount = packet[4:6]
+    question = packet[12:]
+    return packet[0:2] + b"\x81\x83" + qdcount + b"\x00\x00\x00\x00\x00\x00" + question
+
+
+server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server.bind(("0.0.0.0", 53))
+upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+upstream.settimeout(2.0)
+
+while True:
+    try:
+        packet, peer = server.recvfrom(4096)
+    except Exception:
+        continue
+
+    host = parse_qname(packet)
+    if not allows(host):
+        try:
+            server.sendto(nxdomain(packet), peer)
+        except Exception:
+            pass
+        continue
+
+    try:
+        upstream.sendto(packet, UPSTREAM_ADDR)
+        response, _ = upstream.recvfrom(4096)
+        server.sendto(response, peer)
+    except Exception:
+        try:
+            server.sendto(nxdomain(packet), peer)
+        except Exception:
+            pass
+"#;
 
 #[derive(Debug, Clone)]
 pub struct AppleHelperConfig {
@@ -36,6 +133,20 @@ struct SandboxSession {
     container_name: String,
     workspace_host: PathBuf,
     ephemeral_workspace: bool,
+    allowlist_runtime: Option<AllowlistRuntime>,
+}
+
+#[derive(Debug)]
+struct AllowlistRuntime {
+    network_name: String,
+    dns_container_name: String,
+}
+
+#[derive(Debug)]
+struct AllowlistRuntimeSetup {
+    network_name: String,
+    dns_container_name: String,
+    dns_server_ip: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +305,7 @@ impl AppleHelper {
         match result {
             Ok(response) => response,
             Err(err) => HelperResponse::Error {
-                message: err.to_string(),
+                message: format!("{err:#}"),
             },
         }
     }
@@ -224,11 +335,6 @@ impl AppleHelper {
             network_mode.as_deref().unwrap_or("none"),
             network_allowlist.unwrap_or_default(),
         )?;
-        if matches!(network, HelperNetworkMode::Allowlist(_)) {
-            bail!(
-                "allowlist mode is not implemented by this helper; use network=none or network=full"
-            );
-        }
 
         if self.sandboxes.contains_key(&sandbox_id) {
             bail!("sandbox `{sandbox_id}` already exists");
@@ -259,21 +365,39 @@ impl AppleHelper {
                 .with_context(|| format!("create workspace directory {}", workspace.display()))?;
             workspace
         };
+        let allowlist_setup = match &network {
+            HelperNetworkMode::Allowlist(domains) => Some(
+                self.setup_allowlist_runtime(&sandbox_id, domains)
+                    .await
+                    .with_context(|| {
+                        format!("prepare allowlist networking for sandbox `{sandbox_id}`")
+                    })?,
+            ),
+            HelperNetworkMode::None | HelperNetworkMode::Full => None,
+        };
+
         let container_name = format!("hyperbox-{}", sandbox_id);
-        self.start_container(
-            &container_name,
-            &template,
-            &workspace_host,
-            &network,
-            memory_mb,
-            vcpu_count,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "start container runtime for sandbox `{sandbox_id}` using template `{template}`"
+        let start_result = self
+            .start_container(
+                &container_name,
+                &template,
+                &workspace_host,
+                &network,
+                allowlist_setup.as_ref(),
+                memory_mb,
+                vcpu_count,
             )
-        })?;
+            .await;
+        if let Err(err) = start_result {
+            if let Some(runtime) = &allowlist_setup {
+                self.teardown_allowlist_runtime(runtime).await;
+            }
+            return Err(err).with_context(|| {
+                format!(
+                    "start container runtime for sandbox `{sandbox_id}` using template `{template}`"
+                )
+            });
+        }
 
         self.sandboxes.insert(
             sandbox_id.clone(),
@@ -281,6 +405,10 @@ impl AppleHelper {
                 container_name,
                 workspace_host,
                 ephemeral_workspace,
+                allowlist_runtime: allowlist_setup.map(|setup| AllowlistRuntime {
+                    network_name: setup.network_name,
+                    dns_container_name: setup.dns_container_name,
+                }),
             },
         );
 
@@ -300,6 +428,7 @@ impl AppleHelper {
         template: &str,
         workspace_host: &Path,
         network: &HelperNetworkMode,
+        allowlist_setup: Option<&AllowlistRuntimeSetup>,
         memory_mb: Option<u32>,
         vcpu_count: Option<u32>,
     ) -> anyhow::Result<()> {
@@ -322,7 +451,7 @@ impl AppleHelper {
             "--volume".to_string(),
             mount,
         ];
-        args.extend(network.container_args()?);
+        args.extend(network.container_args(allowlist_setup)?);
         args.extend([
             template.to_string(),
             "sleep".to_string(),
@@ -340,6 +469,112 @@ impl AppleHelper {
             );
         }
         Ok(())
+    }
+
+    async fn setup_allowlist_runtime(
+        &self,
+        sandbox_id: &str,
+        domains: &[String],
+    ) -> anyhow::Result<AllowlistRuntimeSetup> {
+        let network_name = format!("{ALLOWLIST_NETWORK_PREFIX}{sandbox_id}");
+        let dns_container_name = format!("{ALLOWLIST_DNS_PREFIX}{sandbox_id}");
+
+        let create_network_result = self
+            .run_container_command(
+                vec![
+                    "network".to_string(),
+                    "create".to_string(),
+                    network_name.clone(),
+                ],
+                None,
+                DEFAULT_IO_TIMEOUT_SECS,
+            )
+            .await?;
+        if create_network_result.exit_code != 0 {
+            bail!(
+                "create allowlist network failed (exit={}): {}",
+                create_network_result.exit_code,
+                String::from_utf8_lossy(&create_network_result.stderr)
+            );
+        }
+
+        let setup_result = async {
+            let gateway_ip = self.inspect_network_gateway(&network_name).await?;
+            let allowlist_json =
+                serde_json::to_string(domains).context("serialize allowlist domains")?;
+            let allowlist_b64 = BASE64.encode(allowlist_json.as_bytes());
+            let dns_script_b64 = BASE64.encode(ALLOWLIST_DNS_SCRIPT.as_bytes());
+
+            let dns_run_result = self
+                .run_container_command(
+                    vec![
+                        "run".to_string(),
+                        "--detach".to_string(),
+                        "--progress".to_string(),
+                        "none".to_string(),
+                        "--name".to_string(),
+                        dns_container_name.clone(),
+                        "--network".to_string(),
+                        network_name.clone(),
+                        "--cpus".to_string(),
+                        "1".to_string(),
+                        "--memory".to_string(),
+                        "256M".to_string(),
+                        "--env".to_string(),
+                        format!("HB_ALLOWLIST_B64={allowlist_b64}"),
+                        "--env".to_string(),
+                        format!("HB_DNS_UPSTREAM={gateway_ip}"),
+                        "--env".to_string(),
+                        format!("HB_DNS_SCRIPT_B64={dns_script_b64}"),
+                        ALLOWLIST_DNS_TEMPLATE.to_string(),
+                        "python3".to_string(),
+                        "-u".to_string(),
+                        "-c".to_string(),
+                        ALLOWLIST_DNS_BOOTSTRAP.to_string(),
+                    ],
+                    None,
+                    DEFAULT_IO_TIMEOUT_SECS,
+                )
+                .await?;
+            if dns_run_result.exit_code != 0 {
+                bail!(
+                    "start allowlist DNS sidecar failed (exit={}): {}",
+                    dns_run_result.exit_code,
+                    String::from_utf8_lossy(&dns_run_result.stderr)
+                );
+            }
+
+            let dns_server_ip = self.inspect_container_ipv4(&dns_container_name).await?;
+            Ok(AllowlistRuntimeSetup {
+                network_name: network_name.clone(),
+                dns_container_name: dns_container_name.clone(),
+                dns_server_ip,
+            })
+        }
+        .await;
+
+        match setup_result {
+            Ok(setup) => Ok(setup),
+            Err(err) => {
+                let _ = self.delete_container_if_present(&dns_container_name).await;
+                let _ = self.delete_network_if_present(&network_name).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn teardown_allowlist_runtime(&self, runtime: &AllowlistRuntimeSetup) {
+        let _ = self
+            .delete_container_if_present(&runtime.dns_container_name)
+            .await;
+        let _ = self.delete_network_if_present(&runtime.network_name).await;
+    }
+
+    async fn teardown_allowlist_runtime_session(&self, runtime: &AllowlistRuntime) {
+        let _ = self
+            .delete_container_if_present(&runtime.dns_container_name)
+            .await;
+        let _ = self.delete_network_if_present(&runtime.network_name).await;
     }
 
     async fn exec(
@@ -505,15 +740,16 @@ impl AppleHelper {
         let result = self
             .run_container_command(args, None, DEFAULT_DESTROY_TIMEOUT_SECS)
             .await?;
-        if result.exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&result.stderr).to_lowercase();
-            if !stderr.contains("not found") {
-                bail!(
-                    "container delete failed (exit={}): {}",
-                    result.exit_code,
-                    String::from_utf8_lossy(&result.stderr)
-                );
-            }
+        if result.exit_code != 0 && !error_output_is_not_found(&result.stderr) {
+            bail!(
+                "container delete failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        if let Some(runtime) = &session.allowlist_runtime {
+            self.teardown_allowlist_runtime_session(runtime).await;
         }
 
         if session.ephemeral_workspace {
@@ -537,6 +773,122 @@ impl AppleHelper {
             "apple helper sandbox destroyed"
         );
         Ok(HelperResponse::Ack)
+    }
+
+    async fn inspect_network_gateway(&self, network_name: &str) -> anyhow::Result<String> {
+        let result = self
+            .run_container_command(
+                vec![
+                    "network".to_string(),
+                    "inspect".to_string(),
+                    network_name.to_string(),
+                ],
+                None,
+                DEFAULT_IO_TIMEOUT_SECS,
+            )
+            .await?;
+        if result.exit_code != 0 {
+            bail!(
+                "inspect network `{network_name}` failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        let output: Value =
+            serde_json::from_slice(&result.stdout).context("parse network inspect output")?;
+        let gateway = output
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|entry| entry.get("status"))
+            .and_then(|status| status.get("ipv4Gateway"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("network inspect output missing status.ipv4Gateway")?;
+        Ok(gateway.to_string())
+    }
+
+    async fn inspect_container_ipv4(&self, container_name: &str) -> anyhow::Result<String> {
+        let result = self
+            .run_container_command(
+                vec!["inspect".to_string(), container_name.to_string()],
+                None,
+                DEFAULT_IO_TIMEOUT_SECS,
+            )
+            .await?;
+        if result.exit_code != 0 {
+            bail!(
+                "inspect container `{container_name}` failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        let output: Value =
+            serde_json::from_slice(&result.stdout).context("parse container inspect output")?;
+        let cidr = output
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|entry| entry.get("networks"))
+            .and_then(Value::as_array)
+            .and_then(|networks| networks.first())
+            .and_then(|network| network.get("ipv4Address"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("container inspect output missing networks[0].ipv4Address")?;
+        let ip = cidr
+            .split('/')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("container inspect ipv4Address did not contain an IPv4 value")?;
+        Ok(ip.to_string())
+    }
+
+    async fn delete_container_if_present(&self, container_name: &str) -> anyhow::Result<()> {
+        let result = self
+            .run_container_command(
+                vec![
+                    "delete".to_string(),
+                    "--force".to_string(),
+                    container_name.to_string(),
+                ],
+                None,
+                DEFAULT_DESTROY_TIMEOUT_SECS,
+            )
+            .await?;
+        if result.exit_code != 0 && !error_output_is_not_found(&result.stderr) {
+            bail!(
+                "container delete failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    async fn delete_network_if_present(&self, network_name: &str) -> anyhow::Result<()> {
+        let result = self
+            .run_container_command(
+                vec![
+                    "network".to_string(),
+                    "delete".to_string(),
+                    network_name.to_string(),
+                ],
+                None,
+                DEFAULT_DESTROY_TIMEOUT_SECS,
+            )
+            .await?;
+        if result.exit_code != 0 && !error_output_is_not_found(&result.stderr) {
+            bail!(
+                "network delete failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        Ok(())
     }
 
     async fn run_container_command(
@@ -651,15 +1003,29 @@ impl HelperNetworkMode {
         }
     }
 
-    fn container_args(&self) -> anyhow::Result<Vec<String>> {
+    fn container_args(
+        &self,
+        allowlist_setup: Option<&AllowlistRuntimeSetup>,
+    ) -> anyhow::Result<Vec<String>> {
         match self {
             Self::None => Ok(vec!["--network".to_string(), "none".to_string()]),
             Self::Full => Ok(vec![]),
-            Self::Allowlist(_) => bail!(
-                "allowlist mode is not implemented by this helper; use network=none or network=full"
-            ),
+            Self::Allowlist(_) => {
+                let setup = allowlist_setup.context("allowlist networking runtime is missing")?;
+                Ok(vec![
+                    "--network".to_string(),
+                    setup.network_name.clone(),
+                    "--dns".to_string(),
+                    setup.dns_server_ip.clone(),
+                ])
+            }
         }
     }
+}
+
+fn error_output_is_not_found(stderr: &[u8]) -> bool {
+    let normalized = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    normalized.contains("not found") || normalized.contains("no such")
 }
 
 fn sanitize_sandbox_id(raw: &str) -> anyhow::Result<String> {
@@ -708,7 +1074,10 @@ fn path_in_container(relative: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HelperNetworkMode, RuntimeKind, normalize_relative_path, sanitize_sandbox_id};
+    use super::{
+        AllowlistRuntimeSetup, HelperNetworkMode, RuntimeKind, normalize_relative_path,
+        sanitize_sandbox_id,
+    };
 
     #[test]
     fn runtime_parser_accepts_supported_values() {
@@ -770,6 +1139,29 @@ mod tests {
         let mode = HelperNetworkMode::parse("allowlist", vec!["pypi.org".to_string()])
             .expect("allowlist mode");
         assert!(matches!(mode, HelperNetworkMode::Allowlist(_)));
-        assert!(mode.container_args().is_err());
+        assert!(mode.container_args(None).is_err());
+    }
+
+    #[test]
+    fn helper_network_allowlist_uses_runtime_dns_and_network() {
+        let mode = HelperNetworkMode::parse("allowlist", vec!["pypi.org".to_string()])
+            .expect("allowlist mode");
+        let setup = AllowlistRuntimeSetup {
+            network_name: "hyperbox-net-test".to_string(),
+            dns_container_name: "hyperbox-dns-test".to_string(),
+            dns_server_ip: "192.168.64.10".to_string(),
+        };
+        let args = mode
+            .container_args(Some(&setup))
+            .expect("allowlist args should resolve");
+        assert_eq!(
+            args,
+            vec![
+                "--network".to_string(),
+                "hyperbox-net-test".to_string(),
+                "--dns".to_string(),
+                "192.168.64.10".to_string()
+            ]
+        );
     }
 }

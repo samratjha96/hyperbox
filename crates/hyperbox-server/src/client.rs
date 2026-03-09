@@ -21,6 +21,12 @@ pub struct ServerInfo {
     pub apple_helper_argv: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveSandboxInfo {
+    pub info: SandboxInfo,
+    pub affinity_name: Option<String>,
+}
+
 impl GrpcControlClient {
     pub async fn connect(endpoint: String) -> anyhow::Result<Self> {
         let inner = HyperboxControlClient::connect(endpoint).await?;
@@ -160,6 +166,43 @@ impl GrpcControlClient {
             created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
                 .with_timezone(&chrono::Utc),
         })
+    }
+
+    pub async fn list_sandboxes(&mut self) -> anyhow::Result<Vec<ActiveSandboxInfo>> {
+        let response = self
+            .inner
+            .list_sandboxes(pb::ListSandboxesRequest {})
+            .await?
+            .into_inner();
+        response
+            .sandboxes
+            .into_iter()
+            .map(|row| {
+                let info = row
+                    .info
+                    .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?;
+                Ok(ActiveSandboxInfo {
+                    info: SandboxInfo {
+                        id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
+                        template: info.template,
+                        state: match info.state.as_str() {
+                            "Provisioning" => hyperbox_core::SandboxState::Provisioning,
+                            "Busy" => hyperbox_core::SandboxState::Busy,
+                            "Stopped" => hyperbox_core::SandboxState::Stopped,
+                            "Failed" => hyperbox_core::SandboxState::Failed,
+                            _ => hyperbox_core::SandboxState::Ready,
+                        },
+                        created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+                            .with_timezone(&chrono::Utc),
+                    },
+                    affinity_name: if row.affinity_name.is_empty() {
+                        None
+                    } else {
+                        Some(row.affinity_name)
+                    },
+                })
+            })
+            .collect()
     }
 
     pub async fn write_file(

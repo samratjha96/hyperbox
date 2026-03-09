@@ -19,6 +19,12 @@ pub struct HyperboxServer {
     snapshots: Arc<dyn SnapshotStore>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveSandboxInfo {
+    pub info: SandboxInfo,
+    pub affinity_name: Option<String>,
+}
+
 impl HyperboxServer {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
         if cfg!(test) {
@@ -105,6 +111,35 @@ impl HyperboxServer {
 
     pub async fn inspect(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
         self.backend.inspect(sandbox_id).await
+    }
+
+    pub async fn list_sandboxes(&self) -> Vec<ActiveSandboxInfo> {
+        let entries: Vec<(SandboxId, Option<String>)> = self
+            .sandboxes
+            .lock()
+            .await
+            .iter()
+            .map(|(id, config)| (id.clone(), config.affinity_name.clone()))
+            .collect();
+
+        let mut rows = Vec::with_capacity(entries.len());
+        for (sandbox_id, affinity_name) in entries {
+            match self.backend.inspect(&sandbox_id).await {
+                Ok(info) => rows.push(ActiveSandboxInfo {
+                    info,
+                    affinity_name,
+                }),
+                Err(err) => {
+                    warn!(
+                        sandbox_id = %sandbox_id.0,
+                        error = %err,
+                        "runtime list_sandboxes skipping missing sandbox"
+                    );
+                }
+            }
+        }
+        rows.sort_by(|a, b| a.info.created_at.cmp(&b.info.created_at));
+        rows
     }
 
     pub async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
@@ -290,5 +325,28 @@ mod tests {
             .await
             .expect("destroy sandbox");
         assert_eq!(server.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn list_sandboxes_returns_active_sandbox_ids() {
+        let backend = Arc::new(LocalBackend::new(Some(
+            std::env::temp_dir().join("hyperbox-server-list-test"),
+        )));
+        let server = HyperboxServer::new(backend);
+
+        let info = server
+            .create_sandbox(SandboxConfig {
+                affinity_name: Some("list-test".to_string()),
+                ..SandboxConfig::default()
+            })
+            .await
+            .expect("create sandbox");
+
+        let rows = server.list_sandboxes().await;
+        assert!(rows.iter().any(|row| row.info.id == info.id));
+        assert!(
+            rows.iter()
+                .any(|row| row.affinity_name.as_deref() == Some("list-test"))
+        );
     }
 }

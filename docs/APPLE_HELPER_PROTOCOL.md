@@ -24,6 +24,10 @@ Each response is one JSON object per line written to helper stdout.
 - `create` launches detached container with:
   - `--network none` when `network_mode=none`
   - default runtime networking when `network_mode=full`
+  - helper-managed allowlist networking when `network_mode=allowlist`:
+    - creates a sandbox-scoped network
+    - starts a DNS allowlist sidecar (`python:3.12`)
+    - wires sandbox DNS to sidecar and returns `NXDOMAIN` for non-allowlisted domains
   - workspace bind mount to `/workspace`
   - deterministic container name `hyperbox-<sandbox_id>`
 - `exec` uses `container exec --workdir /workspace`
@@ -33,7 +37,7 @@ Each response is one JSON object per line written to helper stdout.
 Current limitation:
 - runtime `containerization` is implemented.
 - runtime `virtualization` returns an error (dedicated Virtualization.framework helper is not yet implemented).
-- `network_mode=allowlist` returns an error (allowlist enforcement not implemented yet).
+- allowlist enforcement is DNS/domain-based in built-in helper mode (host-level direct-IP firewall enforcement is not implemented yet).
 
 ## Requests
 

@@ -1,5 +1,6 @@
 use std::{
     io::IsTerminal,
+    path::PathBuf,
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -21,7 +22,7 @@ use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId, Snapshot
 use hyperbox_proto::hyperbox::v1::{
     self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
 };
-use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, serve_grpc};
+use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, ServerInfo, serve_grpc};
 
 mod apple_helper;
 mod setup;
@@ -35,11 +36,22 @@ const SERVER_STARTUP_DELAY_MS: u64 = 150;
 #[command(
     name = "hyperbox",
     version,
-    about = "Secure sandbox runtime for agent code execution"
+    about = "Secure sandbox runtime for agent code execution",
+    long_about = "Secure sandbox runtime for agent code execution.\n\nMost users start with `hyperbox run --cmd \"...\"`.\nFor persistent environments use `create` + `run --sandbox-id/--name`.\nUse `setup` once on macOS to install runtime prerequisites."
 )]
 struct Cli {
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "URL",
+        help = "Control-plane server URL (default: auto-start local server at http://127.0.0.1:50051)"
+    )]
     server_url: Option<String>,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Path to profile config TOML (default: ~/.hyperbox/profiles.toml)"
+    )]
+    profile_config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -47,110 +59,280 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run a command in a sandbox.
     Run {
-        #[arg(long)]
+        #[arg(long, value_name = "ID", help = "Run in an existing sandbox by id")]
         sandbox_id: Option<String>,
-        #[arg(long, conflicts_with = "sandbox_id")]
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with = "sandbox_id",
+            help = "Run in an existing named sandbox (affinity)"
+        )]
         name: Option<String>,
-        #[arg(long, default_value = "python:3.12")]
+        #[arg(
+            long,
+            default_value = "python:3.12",
+            help = "Template image for new sandbox creation"
+        )]
         template: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "COMMAND",
+            help = "Shell command to execute inside the sandbox"
+        )]
         cmd: String,
-        #[arg(long, value_enum, default_value_t = NetworkArg::None)]
-        network: NetworkArg,
-        #[arg(long = "allow")]
-        allow: Vec<String>,
-        #[arg(long, default_value_t = 60)]
-        timeout: u64,
-        #[arg(long, conflicts_with = "sandbox_id")]
-        workspace: Option<String>,
-        #[arg(long = "write")]
-        writes: Vec<String>,
-        #[arg(long = "read")]
-        reads: Vec<String>,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    Create {
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long, default_value = "python:3.12")]
-        template: String,
-        #[arg(long, value_enum, default_value_t = NetworkArg::None)]
-        network: NetworkArg,
-        #[arg(long = "allow")]
-        allow: Vec<String>,
-        #[arg(long, default_value_t = 60)]
-        timeout: u64,
-        #[arg(long, default_value_t = 512)]
-        memory_mb: u32,
-        #[arg(long, default_value_t = 1)]
-        vcpu_count: u8,
-        #[arg(long)]
-        workspace: Option<String>,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    Destroy {
-        #[arg(long, conflicts_with = "name")]
-        sandbox_id: Option<String>,
-        #[arg(long, conflicts_with = "sandbox_id")]
-        name: Option<String>,
-    },
-    Inspect {
-        #[arg(long)]
-        sandbox_id: String,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    Shell {
-        #[arg(long)]
-        sandbox_id: Option<String>,
-        #[arg(long, conflicts_with = "sandbox_id")]
-        name: Option<String>,
-        #[arg(long, default_value = "/bin/sh")]
-        shell: String,
-        #[arg(long, conflicts_with = "sandbox_id")]
-        template: Option<String>,
-        #[arg(long, conflicts_with = "sandbox_id")]
-        workspace: Option<String>,
-        #[arg(long, value_enum, conflicts_with = "sandbox_id")]
+        #[arg(long, value_enum, help = "Network mode for new sandbox creation")]
         network: Option<NetworkArg>,
-        #[arg(long = "allow", conflicts_with = "sandbox_id")]
+        #[arg(
+            long = "allow",
+            value_name = "DOMAIN",
+            help = "Allowlisted domain (repeat for multiple domains, only with allowlist mode)"
+        )]
         allow: Vec<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Profile name (built-ins: locked, web, full; custom from --profile-config)"
+        )]
+        profile: Option<String>,
+        #[arg(long, default_value_t = 60, help = "Command timeout in seconds")]
+        timeout: u64,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "sandbox_id",
+            help = "Bind this host workspace into the sandbox (for new sandbox creation)"
+        )]
+        workspace: Option<String>,
+        #[arg(
+            long = "ensure",
+            value_name = "CMD",
+            help = "Run setup command once per reusable session before --cmd (for example: install dependencies)"
+        )]
+        ensure: Vec<String>,
+        #[arg(
+            long = "write",
+            value_name = "PATH=CONTENT",
+            help = "Write file before command (repeatable)"
+        )]
+        writes: Vec<String>,
+        #[arg(
+            long = "read",
+            value_name = "PATH",
+            help = "Read file after command (repeatable)"
+        )]
+        reads: Vec<String>,
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Print effective isolation and backend selection"
+        )]
+        explain: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Force one-off execution (create + destroy sandbox for this run)"
+        )]
+        ephemeral: bool,
     },
+    /// Create a persistent sandbox and print its id.
+    Create {
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Optional affinity name for reusable named sandbox"
+        )]
+        name: Option<String>,
+        #[arg(
+            long,
+            default_value = "python:3.12",
+            help = "Template image for sandbox"
+        )]
+        template: String,
+        #[arg(long, value_enum, help = "Network mode")]
+        network: Option<NetworkArg>,
+        #[arg(
+            long = "allow",
+            value_name = "DOMAIN",
+            help = "Allowlisted domain (repeat for multiple domains, only with allowlist mode)"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Profile name (built-ins: locked, web, full; custom from --profile-config)"
+        )]
+        profile: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 60,
+            help = "Default command timeout in seconds"
+        )]
+        timeout: u64,
+        #[arg(long, default_value_t = 512, help = "Sandbox memory limit in MiB")]
+        memory_mb: u32,
+        #[arg(long, default_value_t = 1, help = "Virtual CPU count")]
+        vcpu_count: u8,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Bind this host workspace into the sandbox"
+        )]
+        workspace: Option<String>,
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Print effective isolation and backend selection"
+        )]
+        explain: bool,
+    },
+    /// Destroy a sandbox by id or by affinity name.
+    Destroy {
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with = "name",
+            help = "Sandbox id to destroy"
+        )]
+        sandbox_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with = "sandbox_id",
+            help = "Affinity name to resolve and destroy"
+        )]
+        name: Option<String>,
+    },
+    /// List active sandboxes.
+    List {
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+    },
+    /// Inspect sandbox metadata.
+    Inspect {
+        #[arg(long, value_name = "ID", help = "Sandbox id")]
+        sandbox_id: String,
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+    },
+    /// Open an interactive shell in a sandbox.
+    Shell {
+        #[arg(long, value_name = "ID", help = "Attach shell to existing sandbox id")]
+        sandbox_id: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with = "sandbox_id",
+            help = "Attach shell to existing named sandbox"
+        )]
+        name: Option<String>,
+        #[arg(
+            long,
+            default_value = "/bin/sh",
+            help = "Shell executable inside sandbox"
+        )]
+        shell: String,
+        #[arg(
+            long,
+            conflicts_with = "sandbox_id",
+            help = "Template image for ephemeral shell creation"
+        )]
+        template: Option<String>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "sandbox_id",
+            help = "Workspace bind mount for ephemeral shell creation"
+        )]
+        workspace: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            conflicts_with = "sandbox_id",
+            help = "Network mode for ephemeral shell creation"
+        )]
+        network: Option<NetworkArg>,
+        #[arg(
+            long = "allow",
+            value_name = "DOMAIN",
+            conflicts_with = "sandbox_id",
+            help = "Allowlisted domain for ephemeral shell creation"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with = "sandbox_id",
+            help = "Profile name (built-ins: locked, web, full; custom from --profile-config)"
+        )]
+        profile: Option<String>,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Print effective isolation and backend selection"
+        )]
+        explain: bool,
+    },
+    /// List available templates.
     Templates {
-        #[arg(long)]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Optional local template manifest root"
+        )]
         disk_root: Option<String>,
     },
+    /// Start the local gRPC control-plane server (advanced).
     Serve {
-        #[arg(long, default_value = DEFAULT_SERVER_ADDR)]
+        #[arg(long, default_value = DEFAULT_SERVER_ADDR, help = "Bind address")]
         addr: String,
     },
+    /// Print host capability probe for backend selection.
     Probe,
+    /// Install/check runtime prerequisites on this host.
     Setup,
+    /// Start JSON-lines proxy mode for adapter integrations.
+    #[command(
+        after_help = "Protocol:\n  read JSON lines from stdin, write JSON lines to stdout.\n  requests: {\"op\":\"ping\"} | {\"op\":\"exec\",\"cmd\":\"...\",\"timeout\":60} | {\"op\":\"read\",\"path\":\"...\"} | {\"op\":\"write\",\"path\":\"...\",\"content\":\"...\"} | {\"op\":\"destroy\"}\n  responses include op-specific fields or {\"op\":\"error\",\"message\":\"...\"}"
+    )]
     Proxy {
-        #[arg(long, default_value = "python:3.12")]
+        #[arg(
+            long,
+            default_value = "python:3.12",
+            help = "Template image for proxy sandbox"
+        )]
         template: String,
-        #[arg(long, value_enum, default_value_t = NetworkArg::None)]
+        #[arg(long, value_enum, default_value_t = NetworkArg::None, help = "Network mode")]
         network: NetworkArg,
-        #[arg(long = "allow")]
+        #[arg(
+            long = "allow",
+            value_name = "DOMAIN",
+            help = "Allowlisted domain (repeat for multiple domains, only with allowlist mode)"
+        )]
         allow: Vec<String>,
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = 60, help = "Default exec timeout in seconds")]
         timeout: u64,
-        #[arg(long)]
+        #[arg(long, value_name = "PATH", help = "Workspace bind mount path")]
         workspace: Option<String>,
     },
+    #[command(hide = true)]
     AppleHelper {
         #[arg(long, default_value = "container")]
         container_bin: String,
         #[arg(long)]
         state_root: Option<String>,
     },
+    #[command(hide = true)]
     Bench {
         #[command(subcommand)]
         command: BenchCommand,
     },
+    /// Manage snapshots for sandbox reuse and restore.
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommand,
@@ -202,26 +384,39 @@ enum BenchCommand {
 
 #[derive(Debug, Subcommand)]
 enum SnapshotCommand {
+    /// Create a snapshot from an existing sandbox.
     Create {
-        #[arg(long, conflicts_with = "name")]
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with = "name",
+            help = "Source sandbox id"
+        )]
         sandbox_id: Option<String>,
-        #[arg(long, conflicts_with = "sandbox_id")]
+        #[arg(
+            long,
+            value_name = "NAME",
+            conflicts_with = "sandbox_id",
+            help = "Source sandbox affinity name"
+        )]
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_name = "TEXT", help = "Optional user note")]
         note: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
         json: bool,
     },
+    /// Restore a sandbox from snapshot id.
     Restore {
-        #[arg(long)]
+        #[arg(long, value_name = "SNAPSHOT_ID", help = "Snapshot id to restore")]
         snapshot_id: String,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
         json: bool,
     },
+    /// List snapshots for a template.
     List {
-        #[arg(long)]
+        #[arg(long, help = "Template name (defaults to CLI default template)")]
         template: Option<String>,
-        #[arg(long, default_value_t = false)]
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
         json: bool,
     },
 }
@@ -243,6 +438,25 @@ impl NetworkArg {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProfileArg {
+    Locked,
+    Web,
+    Full,
+}
+
+impl ProfileArg {
+    fn parse_builtin(raw: &str) -> Option<Self> {
+        match raw.to_ascii_lowercase().as_str() {
+            "locked" => Some(Self::Locked),
+            "web" => Some(Self::Web),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -256,76 +470,226 @@ async fn main() -> anyhow::Result<()> {
             cmd,
             network,
             allow,
+            profile,
             timeout,
             workspace,
+            ensure,
             writes,
             reads,
             json,
+            explain,
+            ephemeral,
         } => {
+            let run_server_scope = cli
+                .server_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
+            let autostart_default = cli.server_url.is_none();
+            let mut client = connect_client(cli.server_url, autostart_default).await?;
+            let server_info = load_server_info_best_effort(&mut client).await;
+            let explain_details = explain
+                .then(|| server_info.as_ref().map(build_explain_details))
+                .flatten();
+            if (sandbox_id.is_some() || name.is_some())
+                && (network.is_some()
+                    || profile.is_some()
+                    || workspace.is_some()
+                    || !allow.is_empty()
+                    || ephemeral)
+            {
+                bail!(
+                    "--network/--allow/--profile/--workspace/--ephemeral apply only when creating a sandbox; remove --sandbox-id/--name"
+                );
+            }
+            let resolved_policy = resolve_network_policy(
+                profile.as_deref(),
+                network,
+                allow,
+                cli.profile_config.as_deref(),
+            )?;
+
             if let Some(sandbox_id) = sandbox_id {
-                run_existing_remote(
-                    cli.server_url,
-                    sandbox_id,
+                let parsed_sandbox_id = parse_sandbox_id(&sandbox_id)?;
+                let summary = build_effective_isolation_summary(
+                    server_info.as_ref(),
+                    None,
+                    None,
+                    writable_scope_from_writes(&writes, true),
+                    timeout,
+                );
+                print_effective_isolation_summary(&summary, explain_details.as_ref())?;
+                run_existing_with_client(
+                    &mut client,
+                    parsed_sandbox_id,
+                    ensure,
                     cmd,
                     timeout,
                     writes,
                     reads,
                     json,
+                    Some(&summary),
+                    explain_details.as_ref(),
                 )
                 .await?;
                 return Ok(());
             }
             if let Some(name) = name {
-                run_by_name_remote(cli.server_url, name, cmd, timeout, writes, reads, json).await?;
+                let (info, restored) = client.resolve_affinity(&name, true).await?;
+                info!(
+                    affinity = %name,
+                    sandbox_id = %info.id.0,
+                    restored,
+                    "resolved affinity for run command"
+                );
+                let summary = build_effective_isolation_summary(
+                    server_info.as_ref(),
+                    None,
+                    None,
+                    writable_scope_from_writes(&writes, true),
+                    timeout,
+                );
+                print_effective_isolation_summary(&summary, explain_details.as_ref())?;
+                run_existing_with_client(
+                    &mut client,
+                    info.id,
+                    ensure,
+                    cmd,
+                    timeout,
+                    writes,
+                    reads,
+                    json,
+                    Some(&summary),
+                    explain_details.as_ref(),
+                )
+                .await?;
                 return Ok(());
             }
 
-            let config = SandboxConfig {
+            let mut config = SandboxConfig {
                 template,
-                network: network.to_mode(allow),
+                network: resolved_policy.network_mode,
                 timeout_secs: timeout,
                 workspace_dir: workspace,
                 ..SandboxConfig::default()
             };
+            let summary = build_effective_isolation_summary(
+                server_info.as_ref(),
+                Some(&config.network),
+                resolved_policy.profile_label.as_deref(),
+                writable_scope_from_workspace_and_writes(config.workspace_dir.as_deref(), &writes),
+                timeout,
+            );
+            print_effective_isolation_summary(&summary, explain_details.as_ref())?;
+            ensure_network_mode_supported(server_info.as_ref(), &config.network)?;
 
-            run_remote(cli.server_url, config, cmd, timeout, writes, reads, json).await?;
+            if ephemeral {
+                run_remote_with_client(
+                    &mut client,
+                    config,
+                    ensure,
+                    cmd,
+                    timeout,
+                    writes,
+                    reads,
+                    json,
+                    Some(&summary),
+                    explain_details.as_ref(),
+                )
+                .await?;
+            } else {
+                config.affinity_name = Some(derive_auto_run_affinity_name(
+                    &run_server_scope,
+                    &config.template,
+                    config.workspace_dir.as_deref(),
+                    &config.network,
+                ));
+                let (session_id, created_new, session_name) =
+                    ensure_or_create_affinity_session_with_client(&mut client, config).await?;
+                if created_new {
+                    eprintln!(
+                        "session: started `{session_name}` (reused automatically on next `run`; use --ephemeral for one-off)"
+                    );
+                } else {
+                    eprintln!("session: reusing `{session_name}` (use --ephemeral for one-off)");
+                }
+                run_existing_with_client(
+                    &mut client,
+                    session_id,
+                    ensure,
+                    cmd,
+                    timeout,
+                    writes,
+                    reads,
+                    json,
+                    Some(&summary),
+                    explain_details.as_ref(),
+                )
+                .await?;
+            }
         }
         Command::Create {
             name,
             template,
             network,
             allow,
+            profile,
             timeout,
             memory_mb,
             vcpu_count,
             workspace,
             json,
+            explain,
         } => {
             let mut client = connect_client(cli.server_url, true).await?;
-            let info = client
-                .create_sandbox(SandboxConfig {
-                    affinity_name: name,
-                    template,
-                    memory_mb,
-                    vcpu_count,
-                    network: network.to_mode(allow),
-                    timeout_secs: timeout,
-                    workspace_dir: workspace,
-                    ..SandboxConfig::default()
-                })
-                .await?;
+            let server_info = load_server_info_best_effort(&mut client).await;
+            let explain_details = explain
+                .then(|| server_info.as_ref().map(build_explain_details))
+                .flatten();
+            let resolved_policy = resolve_network_policy(
+                profile.as_deref(),
+                network,
+                allow,
+                cli.profile_config.as_deref(),
+            )?;
+            let config = SandboxConfig {
+                affinity_name: name,
+                template,
+                memory_mb,
+                vcpu_count,
+                network: resolved_policy.network_mode,
+                timeout_secs: timeout,
+                workspace_dir: workspace,
+                ..SandboxConfig::default()
+            };
+            let summary = build_effective_isolation_summary(
+                server_info.as_ref(),
+                Some(&config.network),
+                resolved_policy.profile_label.as_deref(),
+                writable_scope_from_workspace_and_writes(config.workspace_dir.as_deref(), &[]),
+                timeout,
+            );
+            print_effective_isolation_summary(&summary, explain_details.as_ref())?;
+            ensure_network_mode_supported(server_info.as_ref(), &config.network)?;
+
+            let info = client.create_sandbox(config).await?;
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string(&SandboxInfoResponse {
+                    serde_json::to_string(&CreateSandboxResponse {
                         sandbox_id: info.id.0.to_string(),
                         template: info.template,
                         state: format!("{:?}", info.state).to_lowercase(),
                         created_at: info.created_at.to_rfc3339(),
+                        effective_isolation: Some(summary),
+                        explain: explain_details,
                     })?
                 );
             } else {
                 println!("{}", info.id.0);
+                eprintln!(
+                    "tip: snapshot this environment with `hyperbox snapshot create --sandbox-id {}`",
+                    info.id.0
+                );
             }
         }
         Command::Destroy { sandbox_id, name } => {
@@ -340,6 +704,50 @@ async fn main() -> anyhow::Result<()> {
             };
             client.destroy_sandbox(&sandbox_id).await?;
         }
+        Command::List { json } => {
+            let mut client = connect_client(cli.server_url, true).await?;
+            let sandboxes = match client.list_sandboxes().await {
+                Ok(rows) => rows,
+                Err(err) => {
+                    if err.to_string().contains("Unimplemented") {
+                        bail!(
+                            "server does not support `list` yet (likely stale daemon). Restart hyperbox server and retry `hyperbox list`."
+                        );
+                    }
+                    return Err(err);
+                }
+            };
+            if json {
+                let rows: Vec<ListSandboxItemResponse> = sandboxes
+                    .into_iter()
+                    .map(|row| ListSandboxItemResponse {
+                        sandbox_id: row.info.id.0.to_string(),
+                        affinity_name: row.affinity_name,
+                        template: row.info.template,
+                        state: format!("{:?}", row.info.state).to_lowercase(),
+                        created_at: row.info.created_at.to_rfc3339(),
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&rows)?);
+            } else {
+                if sandboxes.is_empty() {
+                    println!("no active sandboxes");
+                    return Ok(());
+                }
+                println!("SANDBOX_ID\tNAME\tTEMPLATE\tSTATE\tCREATED_AT");
+                for row in sandboxes {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        row.info.id.0,
+                        row.affinity_name.unwrap_or_else(|| "-".to_string()),
+                        row.info.template,
+                        format!("{:?}", row.info.state).to_lowercase(),
+                        row.info.created_at.to_rfc3339()
+                    );
+                }
+                eprintln!("tip: attach with `hyperbox shell --sandbox-id <id>`");
+            }
+        }
         Command::Inspect { sandbox_id, json } => {
             let mut client = connect_client(cli.server_url, false).await?;
             let sandbox_id = parse_sandbox_id(&sandbox_id)?;
@@ -352,6 +760,8 @@ async fn main() -> anyhow::Result<()> {
                         template: info.template,
                         state: format!("{:?}", info.state).to_lowercase(),
                         created_at: info.created_at.to_rfc3339(),
+                        effective_isolation: None,
+                        explain: None,
                     })?
                 );
             } else {
@@ -366,7 +776,25 @@ async fn main() -> anyhow::Result<()> {
             workspace,
             network,
             allow,
+            profile,
+            explain,
         } => {
+            if (sandbox_id.is_some() || name.is_some())
+                && (network.is_some()
+                    || profile.is_some()
+                    || workspace.is_some()
+                    || !allow.is_empty())
+            {
+                bail!(
+                    "--network/--allow/--profile/--workspace apply only when creating an ephemeral shell; remove --sandbox-id/--name"
+                );
+            }
+            let resolved_policy = resolve_network_policy(
+                profile.as_deref(),
+                network,
+                allow,
+                cli.profile_config.as_deref(),
+            )?;
             let exit_code = shell_command(
                 cli.server_url,
                 sandbox_id,
@@ -374,7 +802,9 @@ async fn main() -> anyhow::Result<()> {
                 &shell,
                 template.unwrap_or_else(|| "python:3.12".to_string()),
                 workspace,
-                network.unwrap_or(NetworkArg::None).to_mode(allow),
+                resolved_policy.network_mode,
+                resolved_policy.profile_label,
+                explain,
             )
             .await?;
             if exit_code != 0 {
@@ -461,77 +891,84 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
         }
-        Command::Bench { command } => match command {
-            BenchCommand::Exec {
-                template,
-                cmd,
-                runs,
-                warmup,
-                json,
-            } => {
-                let config = SandboxConfig {
-                    template,
-                    ..SandboxConfig::default()
-                };
-                let summary = if let Some(server_url) = cli.server_url {
-                    bench_remote(server_url, config, cmd, warmup, runs).await?
-                } else {
-                    bench_local(config, cmd, warmup, runs).await?
-                };
-
-                if json {
-                    println!("{}", serde_json::to_string(&summary)?);
-                } else {
-                    println!(
-                        "runs={} warmup={} mean_ms={:.2} p50_ms={} p95_ms={} min_ms={} max_ms={}",
-                        summary.runs,
-                        summary.warmup,
-                        summary.mean_ms,
-                        summary.p50_ms,
-                        summary.p95_ms,
-                        summary.min_ms,
-                        summary.max_ms
-                    );
-                }
+        Command::Bench { command } => {
+            if std::env::var_os("HYPERBOX_INTERNAL").is_none() {
+                bail!(
+                    "`bench` is an internal command and is disabled by default; set HYPERBOX_INTERNAL=1 to enable"
+                );
             }
-            BenchCommand::Snapshot {
-                template,
-                network,
-                allow,
-                workspace,
-                mutate_cmd,
-                verify_cmd,
-                runs,
-                warmup,
-                timeout,
-                keep_snapshot_artifacts,
-                json,
-            } => {
-                let config = SandboxConfig {
+            match command {
+                BenchCommand::Exec {
                     template,
-                    network: network.to_mode(allow),
-                    timeout_secs: timeout,
-                    workspace_dir: workspace,
-                    ..SandboxConfig::default()
-                };
-                let summary = bench_snapshot_remote(
-                    cli.server_url,
-                    config,
+                    cmd,
+                    runs,
+                    warmup,
+                    json,
+                } => {
+                    let config = SandboxConfig {
+                        template,
+                        ..SandboxConfig::default()
+                    };
+                    let summary = if let Some(server_url) = cli.server_url {
+                        bench_remote(server_url, config, cmd, warmup, runs).await?
+                    } else {
+                        bench_local(config, cmd, warmup, runs).await?
+                    };
+
+                    if json {
+                        println!("{}", serde_json::to_string(&summary)?);
+                    } else {
+                        println!(
+                            "runs={} warmup={} mean_ms={:.2} p50_ms={} p95_ms={} min_ms={} max_ms={}",
+                            summary.runs,
+                            summary.warmup,
+                            summary.mean_ms,
+                            summary.p50_ms,
+                            summary.p95_ms,
+                            summary.min_ms,
+                            summary.max_ms
+                        );
+                    }
+                }
+                BenchCommand::Snapshot {
+                    template,
+                    network,
+                    allow,
+                    workspace,
                     mutate_cmd,
                     verify_cmd,
-                    warmup,
                     runs,
+                    warmup,
                     timeout,
                     keep_snapshot_artifacts,
-                )
-                .await?;
-                if json {
-                    println!("{}", serde_json::to_string(&summary)?);
-                } else {
-                    print_snapshot_bench_summary(&summary);
+                    json,
+                } => {
+                    let config = SandboxConfig {
+                        template,
+                        network: network.to_mode(allow),
+                        timeout_secs: timeout,
+                        workspace_dir: workspace,
+                        ..SandboxConfig::default()
+                    };
+                    let summary = bench_snapshot_remote(
+                        cli.server_url,
+                        config,
+                        mutate_cmd,
+                        verify_cmd,
+                        warmup,
+                        runs,
+                        timeout,
+                        keep_snapshot_artifacts,
+                    )
+                    .await?;
+                    if json {
+                        println!("{}", serde_json::to_string(&summary)?);
+                    } else {
+                        print_snapshot_bench_summary(&summary);
+                    }
                 }
             }
-        },
+        }
         Command::Snapshot { command } => {
             run_snapshot_command(cli.server_url, command).await?;
         }
@@ -602,18 +1039,472 @@ async fn connect_client(
         .with_context(|| format!("failed to connect to hyperbox control plane at {url}"))
 }
 
-async fn run_remote(
-    server_url: Option<String>,
+async fn load_server_info_best_effort(client: &mut GrpcControlClient) -> Option<ServerInfo> {
+    match client.get_server_info().await {
+        Ok(info) => Some(info),
+        Err(err) => {
+            warn!(error = %err, "failed to fetch server info; explain output will be partial");
+            None
+        }
+    }
+}
+
+fn build_explain_details(server_info: &ServerInfo) -> ExplainDetails {
+    ExplainDetails {
+        backend_requested: server_info.backend_requested.clone(),
+        backend_selected: server_info.backend_selected.clone(),
+        backend_reason: server_info.backend_reason.clone(),
+        apple_runtime: server_info.apple_runtime.clone(),
+        apple_helper_argv: server_info.apple_helper_argv.clone(),
+    }
+}
+
+fn build_effective_isolation_summary(
+    server_info: Option<&ServerInfo>,
+    network: Option<&NetworkMode>,
+    profile: Option<&str>,
+    writable_paths: Vec<String>,
+    timeout_secs: u64,
+) -> EffectiveIsolationSummary {
+    let backend = server_info
+        .map(|info| info.backend_selected.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let isolation_class = match backend.as_str() {
+        "firecracker" | "apple" => "vm",
+        "local" => "host",
+        _ => "unknown",
+    }
+    .to_string();
+    let network_mode = match network {
+        Some(NetworkMode::None) => "none".to_string(),
+        Some(NetworkMode::Full) => "full".to_string(),
+        Some(NetworkMode::Allowlist(_)) => "allowlist".to_string(),
+        None => "unknown".to_string(),
+    };
+    let profile = match profile {
+        Some(profile) => profile.to_string(),
+        None => match network {
+            Some(NetworkMode::None) => "locked".to_string(),
+            Some(NetworkMode::Allowlist(_)) => "web".to_string(),
+            Some(NetworkMode::Full) => "full".to_string(),
+            None => "unknown".to_string(),
+        },
+    };
+    let (network_enforcement, network_reason) = network_enforcement_status(server_info, network);
+
+    EffectiveIsolationSummary {
+        backend,
+        isolation_class,
+        profile,
+        network_mode,
+        network_enforcement,
+        network_reason,
+        writable_paths,
+        timeout_secs,
+    }
+}
+
+fn network_enforcement_status(
+    server_info: Option<&ServerInfo>,
+    network: Option<&NetworkMode>,
+) -> (String, Option<String>) {
+    let Some(network) = network else {
+        return (
+            "unknown".to_string(),
+            Some("network mode unavailable".to_string()),
+        );
+    };
+    let Some(server_info) = server_info else {
+        return (
+            "unknown".to_string(),
+            Some("server info unavailable".to_string()),
+        );
+    };
+
+    match server_info.backend_selected.as_str() {
+        "firecracker" => ("enforced".to_string(), None),
+        "local" => (
+            "not_enforced".to_string(),
+            Some(
+                "local backend is non-isolated dev mode; use auto/apple/firecracker for policy enforcement"
+                    .to_string(),
+            ),
+        ),
+        "apple" => match network {
+            NetworkMode::Allowlist(_) => {
+                let runtime_containerization =
+                    server_info.apple_runtime.as_deref() == Some("containerization");
+                let runtime_virtualization =
+                    server_info.apple_runtime.as_deref() == Some("virtualization");
+                let builtin_helper = helper_argv_is_builtin_apple_helper(&server_info.apple_helper_argv);
+                if builtin_helper && runtime_containerization {
+                    (
+                        "enforced".to_string(),
+                        Some("enforced by built-in apple helper allowlist runtime".to_string()),
+                    )
+                } else if runtime_virtualization && !builtin_helper {
+                    (
+                        "enforced".to_string(),
+                        Some("enforced by external apple helper virtualization runtime".to_string()),
+                    )
+                } else if !server_info.apple_helper_argv.is_empty() {
+                    (
+                        "enforced".to_string(),
+                        Some("enforced by helper-managed apple runtime".to_string()),
+                    )
+                } else {
+                    (
+                        "unsupported".to_string(),
+                        Some(
+                            "allowlist requires helper-managed apple runtime; direct container mode supports none/full only".to_string(),
+                        ),
+                    )
+                }
+            }
+            NetworkMode::None | NetworkMode::Full => ("enforced".to_string(), None),
+        },
+        _ => (
+            "unknown".to_string(),
+            Some("unknown backend/network enforcement".to_string()),
+        ),
+    }
+}
+
+fn ensure_network_mode_supported(
+    server_info: Option<&ServerInfo>,
+    network: &NetworkMode,
+) -> anyhow::Result<()> {
+    let (status, reason) = network_enforcement_status(server_info, Some(network));
+    if status == "unsupported" {
+        if let Some(reason) = reason {
+            bail!("{reason}");
+        }
+        bail!("requested network mode is unsupported by active backend");
+    }
+    Ok(())
+}
+
+async fn ensure_or_create_affinity_session_with_client(
+    client: &mut GrpcControlClient,
     config: SandboxConfig,
+) -> anyhow::Result<(SandboxId, bool, String)> {
+    let affinity_name = config
+        .affinity_name
+        .clone()
+        .context("affinity name is required for session reuse")?;
+    let create_config = config.clone();
+    match client.resolve_affinity(&affinity_name, false).await {
+        Ok((info, restored)) => {
+            info!(
+                affinity = %affinity_name,
+                sandbox_id = %info.id.0,
+                restored,
+                "reused affinity sandbox for run command"
+            );
+            Ok((info.id, false, affinity_name))
+        }
+        Err(err) if is_affinity_absent_error(&err) => {
+            let info = client.create_sandbox(create_config).await?;
+            info!(
+                affinity = %affinity_name,
+                sandbox_id = %info.id.0,
+                "created affinity sandbox for run command"
+            );
+            Ok((info.id, true, affinity_name))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_affinity_absent_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("affinity not found") || message.contains("has no active sandbox")
+}
+
+fn derive_auto_run_affinity_name(
+    server_scope: &str,
+    template: &str,
+    workspace_dir: Option<&str>,
+    network: &NetworkMode,
+) -> String {
+    let scope = match workspace_dir {
+        Some(dir) => std::fs::canonicalize(dir)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.to_string()),
+        None => std::env::current_dir()
+            .ok()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "<unknown-cwd>".to_string()),
+    };
+    let network_key = match network {
+        NetworkMode::None => "none".to_string(),
+        NetworkMode::Full => "full".to_string(),
+        NetworkMode::Allowlist(domains) => {
+            let mut normalized: Vec<String> =
+                domains.iter().map(|d| d.to_ascii_lowercase()).collect();
+            normalized.sort();
+            format!("allowlist:{}", normalized.join(","))
+        }
+    };
+    let material =
+        format!("server={server_scope}|template={template}|scope={scope}|network={network_key}");
+    let hash = fnv1a64(material.as_bytes());
+    let template_slug = sanitize_affinity_component(template, 18);
+    format!("auto-{template_slug}-{hash:016x}")
+}
+
+fn sanitize_affinity_component(raw: &str, max_len: usize) -> String {
+    let mut value = String::with_capacity(raw.len().min(max_len));
+    for ch in raw.chars() {
+        if value.len() >= max_len {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() {
+            value.push(ch.to_ascii_lowercase());
+        } else {
+            value.push('-');
+        }
+    }
+    let trimmed = value.trim_matches('-');
+    if trimmed.is_empty() {
+        "run".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn fnv1a64(input: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET_BASIS;
+    for byte in input {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileConfigFile {
+    profiles: std::collections::HashMap<String, ProfileDefinition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileDefinition {
+    network: String,
+    #[serde(default)]
+    allow: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedNetworkPolicy {
+    network_mode: NetworkMode,
+    profile_label: Option<String>,
+}
+
+fn resolve_network_policy(
+    profile: Option<&str>,
+    network: Option<NetworkArg>,
+    allow: Vec<String>,
+    profile_config_path: Option<&std::path::Path>,
+) -> anyhow::Result<ResolvedNetworkPolicy> {
+    let mut resolved = if let Some(profile_name) = profile {
+        let profile_mode = resolve_profile_network_defaults(profile_name, profile_config_path)?;
+        ResolvedNetworkPolicy {
+            network_mode: profile_mode,
+            profile_label: Some(profile_name.to_string()),
+        }
+    } else {
+        ResolvedNetworkPolicy {
+            network_mode: NetworkMode::None,
+            profile_label: None,
+        }
+    };
+
+    if let Some(network_override) = network {
+        resolved.network_mode = match network_override {
+            NetworkArg::None => NetworkMode::None,
+            NetworkArg::Full => NetworkMode::Full,
+            NetworkArg::Allowlist => {
+                let defaults = match &resolved.network_mode {
+                    NetworkMode::Allowlist(domains) => domains.clone(),
+                    _ => Vec::new(),
+                };
+                NetworkMode::Allowlist(defaults)
+            }
+        };
+    }
+
+    if !allow.is_empty() {
+        match &mut resolved.network_mode {
+            NetworkMode::Allowlist(domains) => *domains = allow,
+            _ => bail!(
+                "--allow requires allowlist network (set --network allowlist or use an allowlist profile)"
+            ),
+        }
+    }
+
+    if let NetworkMode::Allowlist(domains) = &resolved.network_mode
+        && domains.is_empty()
+    {
+        bail!(
+            "allowlist mode requires at least one domain (via --allow or profile default allowlist)"
+        );
+    }
+
+    Ok(resolved)
+}
+
+fn resolve_profile_network_defaults(
+    profile_name: &str,
+    profile_config_path: Option<&std::path::Path>,
+) -> anyhow::Result<NetworkMode> {
+    if let Some(builtin) = ProfileArg::parse_builtin(profile_name) {
+        return Ok(match builtin {
+            ProfileArg::Locked => NetworkMode::None,
+            ProfileArg::Web => NetworkMode::Allowlist(Vec::new()),
+            ProfileArg::Full => NetworkMode::Full,
+        });
+    }
+
+    let config_path = resolve_profile_config_path(profile_config_path)?;
+    let raw = std::fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "read profile config `{}` for profile `{profile_name}`",
+            config_path.display()
+        )
+    })?;
+    let parsed: ProfileConfigFile = toml::from_str(&raw)
+        .with_context(|| format!("parse TOML profile config `{}`", config_path.display()))?;
+
+    let profile = parsed.profiles.get(profile_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "profile `{profile_name}` not found in `{}`",
+            config_path.display()
+        )
+    })?;
+
+    let network = match profile.network.to_ascii_lowercase().as_str() {
+        "none" => NetworkMode::None,
+        "full" => NetworkMode::Full,
+        "allowlist" => NetworkMode::Allowlist(profile.allow.clone()),
+        other => {
+            bail!(
+                "profile `{profile_name}` has invalid network `{other}`; expected one of: none, allowlist, full"
+            )
+        }
+    };
+
+    if !profile.allow.is_empty() && !matches!(network, NetworkMode::Allowlist(_)) {
+        bail!("profile `{profile_name}` defines `allow` entries but network is not allowlist");
+    }
+
+    Ok(network)
+}
+
+fn resolve_profile_config_path(
+    profile_config_path: Option<&std::path::Path>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = profile_config_path {
+        return Ok(path.to_path_buf());
+    }
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .context("resolve HOME for default profile config path")?;
+    Ok(home.join(".hyperbox/profiles.toml"))
+}
+
+fn writable_scope_from_workspace_and_writes(
+    workspace: Option<&str>,
+    writes: &[String],
+) -> Vec<String> {
+    let mut writable = Vec::new();
+    if let Some(workspace) = workspace {
+        writable.push(workspace.to_string());
+    } else {
+        writable.push("<ephemeral sandbox workspace>".to_string());
+    }
+
+    for entry in writes {
+        if let Some((path, _)) = entry.split_once('=') {
+            writable.push(path.to_string());
+        }
+    }
+
+    writable.sort();
+    writable.dedup();
+    writable
+}
+
+fn writable_scope_from_writes(writes: &[String], include_existing_workspace: bool) -> Vec<String> {
+    let mut writable = Vec::new();
+    if include_existing_workspace {
+        writable.push("<existing sandbox workspace>".to_string());
+    }
+    for entry in writes {
+        if let Some((path, _)) = entry.split_once('=') {
+            writable.push(path.to_string());
+        }
+    }
+    writable.sort();
+    writable.dedup();
+    writable
+}
+
+fn print_effective_isolation_summary(
+    summary: &EffectiveIsolationSummary,
+    explain: Option<&ExplainDetails>,
+) -> anyhow::Result<()> {
+    eprintln!("effective isolation:");
+    eprintln!(
+        "  backend: {} ({})",
+        summary.backend, summary.isolation_class
+    );
+    eprintln!("  profile: {}", summary.profile);
+    eprintln!(
+        "  network: {} [{}]",
+        summary.network_mode, summary.network_enforcement
+    );
+    if let Some(reason) = &summary.network_reason {
+        eprintln!("  network_reason: {reason}");
+    }
+    eprintln!("  writable: {}", summary.writable_paths.join(", "));
+    if summary.timeout_secs > 0 {
+        eprintln!("  timeout_secs: {}", summary.timeout_secs);
+    }
+
+    if let Some(details) = explain {
+        eprintln!("explain:");
+        eprintln!("  backend_requested: {}", details.backend_requested);
+        eprintln!("  backend_selected: {}", details.backend_selected);
+        eprintln!("  backend_reason: {}", details.backend_reason);
+        if let Some(runtime) = &details.apple_runtime {
+            eprintln!("  apple_runtime: {runtime}");
+        }
+        if !details.apple_helper_argv.is_empty() {
+            eprintln!("  apple_helper: {}", details.apple_helper_argv.join(" "));
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_remote_with_client(
+    client: &mut GrpcControlClient,
+    config: SandboxConfig,
+    ensure_commands: Vec<String>,
     cmd: String,
     timeout: u64,
     writes: Vec<String>,
     reads: Vec<String>,
     json: bool,
+    effective_isolation: Option<&EffectiveIsolationSummary>,
+    explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<()> {
     let op_started = Instant::now();
-    let autostart_default = server_url.is_none();
-    let mut client = connect_client(server_url, autostart_default).await?;
     let create_started = Instant::now();
     let sandbox = client.create_sandbox(config).await?;
     info!(
@@ -633,16 +1524,10 @@ async fn run_remote(
                 .await?;
         }
 
+        run_ensure_commands_with_client(client, &sandbox.id, &ensure_commands, timeout).await?;
+
         let exec_started = Instant::now();
-        let outcome = client
-            .exec(
-                &sandbox.id,
-                ExecRequest {
-                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
-                    timeout_secs: timeout,
-                },
-            )
-            .await?;
+        let outcome = exec_shell_command_with_client(client, &sandbox.id, &cmd, timeout).await?;
         info!(
             sandbox_id = %sandbox.id.0,
             stage = "exec",
@@ -658,7 +1543,7 @@ async fn run_remote(
             artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
         }
 
-        emit_result(outcome, artifacts, json)
+        emit_result(outcome, artifacts, json, effective_isolation, explain)
     }
     .await;
 
@@ -691,80 +1576,17 @@ async fn run_remote(
     Ok(())
 }
 
-async fn run_existing_remote(
-    server_url: Option<String>,
-    sandbox_id: String,
-    cmd: String,
-    timeout: u64,
-    writes: Vec<String>,
-    reads: Vec<String>,
-    json: bool,
-) -> anyhow::Result<()> {
-    let autostart_default = server_url.is_none();
-    let mut client = connect_client(server_url, autostart_default).await?;
-    let sandbox_id = parse_sandbox_id(&sandbox_id)?;
-
-    for entry in writes {
-        let (path, content) = entry
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
-        client
-            .write_file(&sandbox_id, path.to_string(), content.as_bytes().to_vec())
-            .await?;
-    }
-
-    let outcome = client
-        .exec(
-            &sandbox_id,
-            ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
-                timeout_secs: timeout,
-            },
-        )
-        .await?;
-
-    let mut artifacts = Vec::new();
-    for path in reads {
-        let bytes = client.read_file(&sandbox_id, path.clone()).await?;
-        artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
-    }
-
-    let exit_code = emit_result(outcome, artifacts, json)?;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-async fn run_by_name_remote(
-    server_url: Option<String>,
-    name: String,
-    cmd: String,
-    timeout: u64,
-    writes: Vec<String>,
-    reads: Vec<String>,
-    json: bool,
-) -> anyhow::Result<()> {
-    let autostart_default = server_url.is_none();
-    let mut client = connect_client(server_url, autostart_default).await?;
-    let (info, restored) = client.resolve_affinity(&name, true).await?;
-    info!(
-        affinity = %name,
-        sandbox_id = %info.id.0,
-        restored,
-        "resolved affinity for run command"
-    );
-    run_existing_with_client(client, info.id, cmd, timeout, writes, reads, json).await
-}
-
 async fn run_existing_with_client(
-    mut client: GrpcControlClient,
+    client: &mut GrpcControlClient,
     sandbox_id: SandboxId,
+    ensure_commands: Vec<String>,
     cmd: String,
     timeout: u64,
     writes: Vec<String>,
     reads: Vec<String>,
     json: bool,
+    effective_isolation: Option<&EffectiveIsolationSummary>,
+    explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<()> {
     for entry in writes {
         let (path, content) = entry
@@ -775,15 +1597,9 @@ async fn run_existing_with_client(
             .await?;
     }
 
-    let outcome = client
-        .exec(
-            &sandbox_id,
-            ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
-                timeout_secs: timeout,
-            },
-        )
-        .await?;
+    run_ensure_commands_with_client(client, &sandbox_id, &ensure_commands, timeout).await?;
+
+    let outcome = exec_shell_command_with_client(client, &sandbox_id, &cmd, timeout).await?;
 
     let mut artifacts = Vec::new();
     for path in reads {
@@ -791,11 +1607,62 @@ async fn run_existing_with_client(
         artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
     }
 
-    let exit_code = emit_result(outcome, artifacts, json)?;
+    let exit_code = emit_result(outcome, artifacts, json, effective_isolation, explain)?;
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+async fn run_ensure_commands_with_client(
+    client: &mut GrpcControlClient,
+    sandbox_id: &SandboxId,
+    ensure_commands: &[String],
+    timeout_secs: u64,
+) -> anyhow::Result<()> {
+    for ensure in ensure_commands {
+        let marker = format!(".hyperbox/ensure/{:016x}.done", fnv1a64(ensure.as_bytes()));
+        let script = format!(
+            "set -e\nmkdir -p .hyperbox/ensure\nif [ ! -f \"{marker}\" ]; then\n{ensure}\ntouch \"{marker}\"\nfi"
+        );
+        let outcome = client
+            .exec(
+                sandbox_id,
+                ExecRequest {
+                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), script],
+                    timeout_secs,
+                },
+            )
+            .await?;
+        if outcome.exit_code != 0 {
+            let stderr = outcome.stderr.trim();
+            if stderr.is_empty() {
+                bail!("--ensure step failed with exit code {}", outcome.exit_code);
+            }
+            bail!(
+                "--ensure step failed with exit code {}: {stderr}",
+                outcome.exit_code
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn exec_shell_command_with_client(
+    client: &mut GrpcControlClient,
+    sandbox_id: &SandboxId,
+    cmd: &str,
+    timeout_secs: u64,
+) -> anyhow::Result<hyperbox_core::ExecOutcome> {
+    client
+        .exec(
+            sandbox_id,
+            ExecRequest {
+                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.to_string()],
+                timeout_secs,
+            },
+        )
+        .await
 }
 
 async fn shell_command(
@@ -806,13 +1673,29 @@ async fn shell_command(
     template: String,
     workspace: Option<String>,
     network: NetworkMode,
+    profile: Option<String>,
+    explain: bool,
 ) -> anyhow::Result<i32> {
+    let autostart_default = server_url.is_none();
+    let mut client = connect_client(server_url, autostart_default).await?;
+    let server_info = load_server_info_best_effort(&mut client).await;
+    let explain_details = explain
+        .then(|| server_info.as_ref().map(build_explain_details))
+        .flatten();
+
     if let Some(sandbox_id) = sandbox_id {
-        return open_shell(server_url, &sandbox_id, shell).await;
+        let sandbox_id = parse_sandbox_id(&sandbox_id)?;
+        let summary = build_effective_isolation_summary(
+            server_info.as_ref(),
+            None,
+            None,
+            vec!["<existing sandbox workspace>".to_string()],
+            0,
+        );
+        print_effective_isolation_summary(&summary, explain_details.as_ref())?;
+        return open_shell_with_client(&mut client, &sandbox_id, shell).await;
     }
     if let Some(name) = affinity_name {
-        let autostart_default = server_url.is_none();
-        let mut client = connect_client(server_url, autostart_default).await?;
         let (info, restored) = client.resolve_affinity(&name, true).await?;
         info!(
             affinity = %name,
@@ -820,6 +1703,14 @@ async fn shell_command(
             restored,
             "resolved affinity for shell command"
         );
+        let summary = build_effective_isolation_summary(
+            server_info.as_ref(),
+            None,
+            None,
+            vec!["<affinity sandbox workspace>".to_string()],
+            0,
+        );
+        print_effective_isolation_summary(&summary, explain_details.as_ref())?;
         return open_shell_with_client(&mut client, &info.id, shell).await;
     }
 
@@ -833,8 +1724,16 @@ async fn shell_command(
         ),
     };
 
-    let autostart_default = server_url.is_none();
-    let mut client = connect_client(server_url, autostart_default).await?;
+    let summary = build_effective_isolation_summary(
+        server_info.as_ref(),
+        Some(&network),
+        profile.as_deref(),
+        writable_scope_from_workspace_and_writes(workspace_dir.as_deref(), &[]),
+        0,
+    );
+    print_effective_isolation_summary(&summary, explain_details.as_ref())?;
+    ensure_network_mode_supported(server_info.as_ref(), &network)?;
+
     info!(
         template = %template,
         workspace = ?workspace_dir,
@@ -896,17 +1795,6 @@ async fn shell_command(
             sandbox.id.0
         )),
     }
-}
-
-async fn open_shell(
-    server_url: Option<String>,
-    sandbox_id: &str,
-    shell: &str,
-) -> anyhow::Result<i32> {
-    let autostart_default = server_url.is_none();
-    let mut client = connect_client(server_url, autostart_default).await?;
-    let sandbox_id = parse_sandbox_id(sandbox_id)?;
-    open_shell_with_client(&mut client, &sandbox_id, shell).await
 }
 
 async fn open_shell_with_client(
@@ -1155,6 +2043,13 @@ async fn run_snapshot_command(
                 );
             } else {
                 println!("{}", snapshot_id.0);
+                eprintln!(
+                    "tip: restore with `hyperbox snapshot restore --snapshot-id {}`",
+                    snapshot_id.0
+                );
+                eprintln!(
+                    "tip: list snapshots for template with `hyperbox snapshot list --template python:3.12`"
+                );
             }
         }
         SnapshotCommand::Restore { snapshot_id, json } => {
@@ -1168,10 +2063,16 @@ async fn run_snapshot_command(
                         template: info.template,
                         state: format!("{:?}", info.state).to_lowercase(),
                         created_at: info.created_at.to_rfc3339(),
+                        effective_isolation: None,
+                        explain: None,
                     })?
                 );
             } else {
                 println!("{}", info.id.0);
+                eprintln!(
+                    "tip: open a shell in the restored sandbox with `hyperbox shell --sandbox-id {}`",
+                    info.id.0
+                );
             }
         }
         SnapshotCommand::List { template, json } => {
@@ -1240,9 +2141,32 @@ enum ProxyResponse {
 async fn run_proxy_loop(server_url: Option<String>, config: SandboxConfig) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    let template = config.template.clone();
+    let workspace = config.workspace_dir.clone();
+    let network_label = match &config.network {
+        NetworkMode::None => "none".to_string(),
+        NetworkMode::Full => "full".to_string(),
+        NetworkMode::Allowlist(domains) => {
+            if domains.is_empty() {
+                "allowlist".to_string()
+            } else {
+                format!("allowlist({})", domains.join(","))
+            }
+        }
+    };
+
     let mut client = connect_client(server_url, true).await?;
     let sandbox = client.create_sandbox(config).await?;
     let sandbox_id = sandbox.id;
+    eprintln!(
+        "proxy: started sandbox {} (template={}, network={}, workspace={})",
+        sandbox_id.0,
+        template,
+        network_label,
+        workspace.unwrap_or_else(|| "<ephemeral sandbox workspace>".to_string())
+    );
+    eprintln!("proxy: reading JSON lines from stdin and writing JSON lines to stdout");
+    eprintln!("proxy: request ops = ping | exec | read | write | destroy (destroy exits proxy)");
 
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
@@ -1329,7 +2253,11 @@ fn emit_result(
     outcome: hyperbox_core::ExecOutcome,
     artifacts: Vec<(String, String)>,
     json: bool,
+    effective_isolation: Option<&EffectiveIsolationSummary>,
+    explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<i32> {
+    let command_not_found =
+        outcome.exit_code == 127 && outcome.stderr.to_ascii_lowercase().contains("not found");
     if json {
         let response = RunResponse {
             exit_code: outcome.exit_code,
@@ -1337,6 +2265,8 @@ fn emit_result(
             stdout: outcome.stdout,
             stderr: outcome.stderr,
             artifacts,
+            effective_isolation: effective_isolation.cloned(),
+            explain: explain.cloned(),
         };
         println!("{}", serde_json::to_string(&response)?);
     } else {
@@ -1348,6 +2278,11 @@ fn emit_result(
             if !data.ends_with('\n') {
                 println!();
             }
+        }
+        if command_not_found {
+            eprintln!(
+                "tip: install missing tools in this sandbox session (for example: `hyperbox run --profile full --cmd \"python3 -m pip install pytest\"`), then rerun"
+            );
         }
     }
 
@@ -1361,6 +2296,10 @@ struct RunResponse {
     stdout: String,
     stderr: String,
     artifacts: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_isolation: Option<EffectiveIsolationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explain: Option<ExplainDetails>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1369,6 +2308,46 @@ struct SandboxInfoResponse {
     template: String,
     state: String,
     created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_isolation: Option<EffectiveIsolationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explain: Option<ExplainDetails>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateSandboxResponse {
+    sandbox_id: String,
+    template: String,
+    state: String,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_isolation: Option<EffectiveIsolationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explain: Option<ExplainDetails>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EffectiveIsolationSummary {
+    backend: String,
+    isolation_class: String,
+    profile: String,
+    network_mode: String,
+    network_enforcement: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_reason: Option<String>,
+    writable_paths: Vec<String>,
+    timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExplainDetails {
+    backend_requested: String,
+    backend_selected: String,
+    backend_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_runtime: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    apple_helper_argv: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1435,6 +2414,15 @@ struct SnapshotListItemResponse {
     affinity_name: Option<String>,
     created_at: String,
     note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListSandboxItemResponse {
+    sandbox_id: String,
+    affinity_name: Option<String>,
+    template: String,
+    state: String,
+    created_at: String,
 }
 
 async fn bench_local(
@@ -1741,7 +2729,16 @@ fn percentile(values: &[u128], p: usize) -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_container_bin_from_helper_argv, helper_argv_is_builtin_apple_helper};
+    use std::fs;
+
+    use super::{
+        NetworkArg, derive_auto_run_affinity_name, extract_container_bin_from_helper_argv,
+        helper_argv_is_builtin_apple_helper, is_affinity_absent_error, network_enforcement_status,
+        resolve_network_policy, writable_scope_from_workspace_and_writes,
+    };
+    use hyperbox_core::NetworkMode;
+    use hyperbox_server::ServerInfo;
+    use uuid::Uuid;
 
     #[test]
     fn parses_container_bin_from_helper_args() {
@@ -1767,5 +2764,226 @@ mod tests {
             "custom-helper".to_string(),
             "--foo".to_string()
         ]));
+    }
+
+    #[test]
+    fn network_enforcement_marks_local_as_not_enforced() {
+        let server_info = ServerInfo {
+            server_version: "x".to_string(),
+            process_id: "1".to_string(),
+            executable_path: "/tmp/hyperbox".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            backend_requested: "auto".to_string(),
+            backend_selected: "local".to_string(),
+            backend_reason: "selected via local".to_string(),
+            apple_runtime: None,
+            apple_helper_argv: vec![],
+        };
+
+        let (status, reason) =
+            network_enforcement_status(Some(&server_info), Some(&NetworkMode::None));
+        assert_eq!(status, "not_enforced");
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn network_enforcement_accepts_builtin_apple_allowlist() {
+        let server_info = ServerInfo {
+            server_version: "x".to_string(),
+            process_id: "1".to_string(),
+            executable_path: "/tmp/hyperbox".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            backend_requested: "auto".to_string(),
+            backend_selected: "apple".to_string(),
+            backend_reason: "selected via auto".to_string(),
+            apple_runtime: Some("containerization".to_string()),
+            apple_helper_argv: vec!["hyperbox".to_string(), "apple-helper".to_string()],
+        };
+
+        let (status, reason) = network_enforcement_status(
+            Some(&server_info),
+            Some(&NetworkMode::Allowlist(vec!["example.com".to_string()])),
+        );
+        assert_eq!(status, "enforced");
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn network_enforcement_accepts_external_virtualization_allowlist() {
+        let server_info = ServerInfo {
+            server_version: "x".to_string(),
+            process_id: "1".to_string(),
+            executable_path: "/tmp/hyperbox".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            backend_requested: "auto".to_string(),
+            backend_selected: "apple".to_string(),
+            backend_reason: "selected via auto".to_string(),
+            apple_runtime: Some("virtualization".to_string()),
+            apple_helper_argv: vec!["external-helper".to_string()],
+        };
+
+        let (status, reason) = network_enforcement_status(
+            Some(&server_info),
+            Some(&NetworkMode::Allowlist(vec!["example.com".to_string()])),
+        );
+        assert_eq!(status, "enforced");
+        assert!(reason.is_some());
+    }
+
+    #[test]
+    fn writable_scope_includes_workspace_and_write_paths_without_duplicates() {
+        let writable = writable_scope_from_workspace_and_writes(
+            Some("/tmp/workspace"),
+            &[
+                "output.txt=1".to_string(),
+                "output.txt=2".to_string(),
+                "state/cache.txt=3".to_string(),
+            ],
+        );
+        assert!(writable.contains(&"/tmp/workspace".to_string()));
+        assert!(writable.contains(&"output.txt".to_string()));
+        assert!(writable.contains(&"state/cache.txt".to_string()));
+        assert_eq!(
+            writable
+                .iter()
+                .filter(|p| p.as_str() == "output.txt")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resolve_network_policy_defaults_to_none() {
+        let resolved = resolve_network_policy(None, None, vec![], None).expect("default policy");
+        assert!(matches!(resolved.network_mode, NetworkMode::None));
+        assert!(resolved.profile_label.is_none());
+    }
+
+    #[test]
+    fn resolve_network_policy_rejects_empty_allowlist() {
+        let err = resolve_network_policy(None, Some(NetworkArg::Allowlist), vec![], None)
+            .expect_err("empty allowlist should fail");
+        assert!(err.to_string().contains("at least one domain"));
+    }
+
+    #[test]
+    fn resolve_network_policy_web_profile_requires_allow_entries() {
+        let err = resolve_network_policy(Some("web"), None, vec![], None)
+            .expect_err("web profile without allowlist should fail");
+        assert!(err.to_string().contains("at least one domain"));
+    }
+
+    #[test]
+    fn resolve_network_policy_full_profile_rejects_allow_entries() {
+        let err = resolve_network_policy(
+            Some("full"),
+            Some(NetworkArg::Full),
+            vec!["example.com".to_string()],
+            None,
+        )
+        .expect_err("full profile should reject allowlist entries");
+        assert!(err.to_string().contains("--allow requires allowlist"));
+    }
+
+    #[test]
+    fn resolve_network_policy_profile_web_maps_to_allowlist() {
+        let resolved = resolve_network_policy(
+            Some("web"),
+            Some(NetworkArg::Allowlist),
+            vec!["example.com".to_string()],
+            None,
+        )
+        .expect("web profile");
+        assert!(matches!(resolved.network_mode, NetworkMode::Allowlist(_)));
+        assert_eq!(resolved.profile_label.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn resolve_network_policy_allows_profile_plus_override_mix_and_match() {
+        let resolved = resolve_network_policy(
+            Some("locked"),
+            Some(NetworkArg::Allowlist),
+            vec!["example.com".to_string()],
+            None,
+        )
+        .expect("mixed profile + override");
+        assert!(matches!(resolved.network_mode, NetworkMode::Allowlist(_)));
+        assert_eq!(resolved.profile_label.as_deref(), Some("locked"));
+    }
+
+    #[test]
+    fn resolve_network_policy_supports_custom_profiles_from_toml() {
+        let path =
+            std::env::temp_dir().join(format!("hyperbox-profile-test-{}.toml", Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"
+[profiles.team_web]
+network = "allowlist"
+allow = ["github.com", "pypi.org"]
+"#,
+        )
+        .expect("write profile config");
+
+        let resolved = resolve_network_policy(Some("team_web"), None, vec![], Some(&path))
+            .expect("custom profile from toml");
+        let domains = match resolved.network_mode {
+            NetworkMode::Allowlist(domains) => domains,
+            other => panic!("expected allowlist mode, got {other:?}"),
+        };
+        assert_eq!(
+            domains,
+            vec!["github.com".to_string(), "pypi.org".to_string()]
+        );
+        assert_eq!(resolved.profile_label.as_deref(), Some("team_web"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn derive_auto_run_affinity_name_is_stable_for_same_inputs() {
+        let first = derive_auto_run_affinity_name(
+            "http://127.0.0.1:50051",
+            "python:3.12",
+            Some("/tmp/project"),
+            &NetworkMode::Allowlist(vec!["example.com".to_string(), "github.com".to_string()]),
+        );
+        let second = derive_auto_run_affinity_name(
+            "http://127.0.0.1:50051",
+            "python:3.12",
+            Some("/tmp/project"),
+            &NetworkMode::Allowlist(vec!["github.com".to_string(), "example.com".to_string()]),
+        );
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn derive_auto_run_affinity_name_changes_with_network() {
+        let none = derive_auto_run_affinity_name(
+            "http://127.0.0.1:50051",
+            "python:3.12",
+            Some("/tmp/project"),
+            &NetworkMode::None,
+        );
+        let full = derive_auto_run_affinity_name(
+            "http://127.0.0.1:50051",
+            "python:3.12",
+            Some("/tmp/project"),
+            &NetworkMode::Full,
+        );
+        assert_ne!(none, full);
+    }
+
+    #[test]
+    fn affinity_absent_error_matcher_detects_expected_messages() {
+        let missing = anyhow::anyhow!("status: Internal, message: \"affinity not found: auto\"");
+        assert!(is_affinity_absent_error(&missing));
+
+        let inactive =
+            anyhow::anyhow!("status: Internal, message: \"affinity `auto` has no active sandbox\"");
+        assert!(is_affinity_absent_error(&inactive));
+
+        let unrelated = anyhow::anyhow!("status: Internal, message: \"permission denied\"");
+        assert!(!is_affinity_absent_error(&unrelated));
     }
 }

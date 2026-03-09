@@ -8,7 +8,7 @@ pub mod runtime;
 pub mod snapshot_store;
 
 pub use backend_factory::{BackendKind, BackendSelection, resolve_backend, select_backend};
-pub use client::{GrpcControlClient, ServerInfo};
+pub use client::{ActiveSandboxInfo, GrpcControlClient, ServerInfo};
 pub use grpc::{GrpcControlService, serve_grpc};
 pub use local_backend::LocalBackend;
 pub use metrics::{MetricsCollector, MetricsSnapshot};

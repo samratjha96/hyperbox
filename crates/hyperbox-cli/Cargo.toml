@@ -20,6 +20,7 @@ tokio.workspace = true
 tokio-stream = "0.1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+toml = "0.8"
 uuid.workspace = true
 hyperbox-apple = { path = "../hyperbox-apple" }
 hyperbox-core = { path = "../hyperbox-core" }
