@@ -1,12 +1,15 @@
 use std::{
     collections::BTreeSet,
     collections::HashMap,
+    fs::File,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use chrono::Utc;
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+use tar::{Archive, Builder};
 use tokio::{
     sync::Mutex,
     task::JoinHandle,
@@ -16,7 +19,7 @@ use tracing::{info, warn};
 
 use hyperbox_core::{
     FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
-    SandboxInfo, SandboxLease, SandboxState,
+    SandboxInfo, SandboxLease, SandboxState, SnapshotId,
 };
 use hyperbox_network::{
     CommandExecutor, FirewallManager, NetworkPolicyEvaluator, RecordingExecutor, ShellExecutor,
@@ -232,6 +235,36 @@ impl FirecrackerBackend {
         }
         Ok(())
     }
+
+    async fn archive_workspace(source: PathBuf, artifact_path: PathBuf) -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = File::create(&artifact_path)?;
+            let encoder = GzEncoder::new(file, Compression::default());
+            let mut builder = Builder::new(encoder);
+            builder.append_dir_all(".", &source)?;
+            let encoder = builder.into_inner()?;
+            encoder.finish()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            HyperboxError::ExecutionFailed(format!("snapshot archive task join failed: {e}"))
+        })?
+    }
+
+    async fn unpack_workspace(artifact_path: PathBuf, destination: PathBuf) -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = File::open(&artifact_path)?;
+            let decoder = GzDecoder::new(file);
+            let mut archive = Archive::new(decoder);
+            archive.unpack(&destination)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            HyperboxError::ExecutionFailed(format!("snapshot restore task join failed: {e}"))
+        })?
+    }
 }
 
 fn parse_agent_socket_addr(endpoint: &str) -> Result<SocketAddr> {
@@ -307,8 +340,7 @@ async fn resolve_allowlist_ips(domains: &[String]) -> Result<Vec<IpAddr>> {
     for domain in domains {
         if domain.contains('*') {
             return Err(HyperboxError::InvalidConfig(
-                "wildcard allowlist entries are not supported in firecracker backend yet"
-                    .to_string(),
+                "wildcard allowlist entries are not supported; use explicit domains".to_string(),
             ));
         }
 
@@ -563,6 +595,93 @@ impl SandboxBackend for FirecrackerBackend {
         Ok(())
     }
 
+    async fn create_snapshot(
+        &self,
+        sandbox_id: &SandboxId,
+        _snapshot_id: &SnapshotId,
+        artifact_path: &Path,
+    ) -> Result<()> {
+        let workspace_path = {
+            let sandboxes = self.sandboxes.lock().await;
+            let sandbox = sandboxes
+                .get(sandbox_id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+            sandbox.agent_workspace.path.clone()
+        };
+
+        let source = tokio::fs::canonicalize(&workspace_path)
+            .await
+            .map_err(|e| {
+                HyperboxError::ExecutionFailed(format!(
+                    "snapshot source does not exist `{}`: {e}",
+                    workspace_path.display()
+                ))
+            })?;
+        let metadata = tokio::fs::metadata(&source).await?;
+        if !metadata.is_dir() {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "snapshot source is not a directory: {}",
+                source.display()
+            )));
+        }
+
+        if let Some(parent) = artifact_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        if artifact_path.exists() {
+            tokio::fs::remove_file(artifact_path).await?;
+        }
+        Self::archive_workspace(source, artifact_path.to_path_buf()).await
+    }
+
+    async fn restore_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+        artifact_path: &Path,
+        config: SandboxConfig,
+    ) -> Result<SandboxLease> {
+        if !artifact_path.exists() {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "snapshot artifact missing for {} at {}",
+                snapshot_id.0,
+                artifact_path.display()
+            )));
+        }
+
+        let lease = self.create(config).await?;
+        let binding = {
+            let sandboxes = self.sandboxes.lock().await;
+            let sandbox = sandboxes
+                .get(&lease.id)
+                .ok_or_else(|| HyperboxError::SandboxNotFound(lease.id.0.to_string()))?;
+            sandbox.agent_workspace.clone()
+        };
+
+        if binding.linked_workspace {
+            let _ = self.destroy(&lease.id).await;
+            return Err(HyperboxError::ExecutionFailed(
+                "firecracker snapshot restore into shared workspace_dir is not supported"
+                    .to_string(),
+            ));
+        }
+
+        if binding.path.exists() {
+            tokio::fs::remove_dir_all(&binding.path).await?;
+        }
+        tokio::fs::create_dir_all(&binding.path).await?;
+
+        if let Err(err) =
+            Self::unpack_workspace(artifact_path.to_path_buf(), binding.path.clone()).await
+        {
+            let _ = self.destroy(&lease.id).await;
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "firecracker snapshot restore failed for {}: {err}",
+                snapshot_id.0
+            )));
+        }
+        Ok(lease)
+    }
+
     async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
         let mut sandboxes = self.sandboxes.lock().await;
         let mut sandbox = sandboxes
@@ -613,7 +732,7 @@ impl SandboxBackend for FirecrackerBackend {
 #[cfg(test)]
 mod tests {
     use super::{FirecrackerBackend, FirecrackerBackendConfig, parse_agent_socket_addr};
-    use hyperbox_core::{NetworkMode, SandboxConfig, SandboxId};
+    use hyperbox_core::{NetworkMode, Result, SandboxConfig, SandboxId};
 
     #[test]
     fn parses_agent_socket_addr_from_url() {
@@ -676,5 +795,31 @@ mod tests {
         tokio::fs::remove_dir_all(&base)
             .await
             .expect("cleanup test base");
+    }
+
+    #[tokio::test]
+    async fn snapshot_archive_roundtrip_preserves_workspace_files() -> Result<()> {
+        let base = std::env::temp_dir().join(format!(
+            "hyperbox-firecracker-snap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = base.join("source");
+        let restored = base.join("restored");
+        tokio::fs::create_dir_all(source.join("nested")).await?;
+        tokio::fs::write(source.join("root.txt"), b"alpha").await?;
+        tokio::fs::write(source.join("nested/data.txt"), b"beta").await?;
+
+        let artifact = base.join("snapshot.tar.gz");
+        FirecrackerBackend::archive_workspace(source.clone(), artifact.clone()).await?;
+        tokio::fs::create_dir_all(&restored).await?;
+        FirecrackerBackend::unpack_workspace(artifact, restored.clone()).await?;
+
+        let root = tokio::fs::read_to_string(restored.join("root.txt")).await?;
+        let nested = tokio::fs::read_to_string(restored.join("nested/data.txt")).await?;
+        assert_eq!(root, "alpha");
+        assert_eq!(nested, "beta");
+
+        tokio::fs::remove_dir_all(base).await?;
+        Ok(())
     }
 }
