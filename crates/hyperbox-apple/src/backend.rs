@@ -30,6 +30,8 @@ const DEFAULT_IO_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DESTROY_TIMEOUT_SECS: u64 = 30;
 const SNAPSHOT_ARCHIVE_DIR_REL: &str = ".hyperbox/snapshots";
 const APPLE_ALLOWLIST_REQUIRES_HELPER_MSG: &str = "apple allowlist requires helper-managed runtime; direct container mode supports network=none/full only";
+const ALLOWLIST_NETWORK_PREFIX: &str = "hyperbox-net-";
+const ALLOWLIST_DNS_PREFIX: &str = "hyperbox-dns-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppleRuntimeKind {
@@ -345,6 +347,14 @@ impl AppleVzBackend {
         direct: &DirectContainerSandbox,
         req: hyperbox_core::ExecRequest,
     ) -> Result<hyperbox_core::ExecOutcome> {
+        self.exec_in_container(&direct.container_name, req).await
+    }
+
+    async fn exec_in_container(
+        &self,
+        container_name: &str,
+        req: hyperbox_core::ExecRequest,
+    ) -> Result<hyperbox_core::ExecOutcome> {
         let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
             HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
         })?;
@@ -352,7 +362,7 @@ impl AppleVzBackend {
             "exec".to_string(),
             "--workdir".to_string(),
             WORKDIR_IN_CONTAINER.to_string(),
-            direct.container_name.clone(),
+            container_name.to_string(),
         ];
         args.extend(req.command);
         let result =
@@ -371,6 +381,16 @@ impl AppleVzBackend {
         path: &str,
         timeout_secs: u64,
     ) -> Result<FilePayload> {
+        self.read_file_in_container(&direct.container_name, path, timeout_secs)
+            .await
+    }
+
+    async fn read_file_in_container(
+        &self,
+        container_name: &str,
+        path: &str,
+        timeout_secs: u64,
+    ) -> Result<FilePayload> {
         let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
             HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
         })?;
@@ -380,13 +400,16 @@ impl AppleVzBackend {
             "exec".to_string(),
             "--workdir".to_string(),
             WORKDIR_IN_CONTAINER.to_string(),
-            direct.container_name.clone(),
+            container_name.to_string(),
             "/usr/bin/env".to_string(),
             "cat".to_string(),
             container_path,
         ];
         let result = run_container_command(container_bin, args, None, timeout_secs.max(1)).await?;
         if result.exit_code != 0 {
+            if container_output_is_not_found(&result.stderr) {
+                return Err(HyperboxError::SandboxNotFound(container_name.to_string()));
+            }
             return Err(HyperboxError::ExecutionFailed(format!(
                 "read failed (exit={}): {}",
                 result.exit_code,
@@ -405,6 +428,16 @@ impl AppleVzBackend {
         payload: FilePayload,
         timeout_secs: u64,
     ) -> Result<()> {
+        self.write_file_in_container(&direct.container_name, payload, timeout_secs)
+            .await
+    }
+
+    async fn write_file_in_container(
+        &self,
+        container_name: &str,
+        payload: FilePayload,
+        timeout_secs: u64,
+    ) -> Result<()> {
         let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
             HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
         })?;
@@ -412,7 +445,7 @@ impl AppleVzBackend {
         let container_path = path_in_container(&relative);
         let payload_len = payload.bytes.len();
         debug!(
-            container = %direct.container_name,
+            container = %container_name,
             path = %payload.path,
             bytes = payload_len,
             timeout_secs,
@@ -426,7 +459,7 @@ impl AppleVzBackend {
                     "exec".to_string(),
                     "--workdir".to_string(),
                     WORKDIR_IN_CONTAINER.to_string(),
-                    direct.container_name.clone(),
+                    container_name.to_string(),
                     "/usr/bin/env".to_string(),
                     "mkdir".to_string(),
                     "-p".to_string(),
@@ -436,6 +469,9 @@ impl AppleVzBackend {
                     run_container_command(container_bin, mkdir_args, None, timeout_secs.max(1))
                         .await?;
                 if mkdir_result.exit_code != 0 {
+                    if container_output_is_not_found(&mkdir_result.stderr) {
+                        return Err(HyperboxError::SandboxNotFound(container_name.to_string()));
+                    }
                     return Err(HyperboxError::ExecutionFailed(format!(
                         "create parent directory failed (exit={}): {}",
                         mkdir_result.exit_code,
@@ -450,7 +486,7 @@ impl AppleVzBackend {
             "--interactive".to_string(),
             "--workdir".to_string(),
             WORKDIR_IN_CONTAINER.to_string(),
-            direct.container_name.clone(),
+            container_name.to_string(),
             "/usr/bin/env".to_string(),
             "tee".to_string(),
             container_path,
@@ -463,6 +499,9 @@ impl AppleVzBackend {
         )
         .await?;
         if write_result.exit_code != 0 {
+            if container_output_is_not_found(&write_result.stderr) {
+                return Err(HyperboxError::SandboxNotFound(container_name.to_string()));
+            }
             return Err(HyperboxError::ExecutionFailed(format!(
                 "write failed (exit={}): {}",
                 write_result.exit_code,
@@ -473,26 +512,8 @@ impl AppleVzBackend {
     }
 
     async fn destroy_direct_container(&self, direct: DirectContainerSandbox) -> Result<()> {
-        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
-            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
-        })?;
-        let args = vec![
-            "delete".to_string(),
-            "--force".to_string(),
-            direct.container_name.clone(),
-        ];
-        let result =
-            run_container_command(container_bin, args, None, DEFAULT_DESTROY_TIMEOUT_SECS).await?;
-        if result.exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&result.stderr).to_lowercase();
-            if !stderr.contains("not found") {
-                return Err(HyperboxError::ExecutionFailed(format!(
-                    "container delete failed (exit={}): {}",
-                    result.exit_code,
-                    stderr_summary(&result.stderr)
-                )));
-            }
-        }
+        self.destroy_container_by_name(&direct.container_name)
+            .await?;
 
         if direct.ephemeral_workspace {
             tokio::fs::remove_dir_all(&direct.workspace_host)
@@ -508,6 +529,101 @@ impl AppleVzBackend {
             }
         }
         Ok(())
+    }
+
+    async fn destroy_container_by_name(&self, container_name: &str) -> Result<()> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let args = vec![
+            "delete".to_string(),
+            "--force".to_string(),
+            container_name.to_string(),
+        ];
+        let result =
+            run_container_command(container_bin, args, None, DEFAULT_DESTROY_TIMEOUT_SECS).await?;
+        if result.exit_code != 0 {
+            if !error_output_is_not_found(&result.stderr) {
+                return Err(HyperboxError::ExecutionFailed(format!(
+                    "container delete failed (exit={}): {}",
+                    result.exit_code,
+                    stderr_summary(&result.stderr)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_network_if_present(&self, network_name: &str) -> Result<()> {
+        let container_bin = self.direct_container_bin.as_deref().ok_or_else(|| {
+            HyperboxError::InvalidConfig("direct container mode not enabled".to_string())
+        })?;
+        let args = vec![
+            "network".to_string(),
+            "delete".to_string(),
+            network_name.to_string(),
+        ];
+        let result =
+            run_container_command(container_bin, args, None, DEFAULT_DESTROY_TIMEOUT_SECS).await?;
+        if result.exit_code != 0 && !error_output_is_not_found(&result.stderr) {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "network delete failed (exit={}): {}",
+                result.exit_code,
+                stderr_summary(&result.stderr)
+            )));
+        }
+        Ok(())
+    }
+
+    async fn inspect_container_fallback(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
+        let container_bin = self
+            .direct_container_bin
+            .as_deref()
+            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+        let container_name = format!("hyperbox-{}", sandbox_id.0);
+        let args = vec!["inspect".to_string(), container_name];
+        let result =
+            run_container_command(container_bin, args, None, DEFAULT_IO_TIMEOUT_SECS).await?;
+        if result.exit_code != 0 {
+            if error_output_is_not_found(&result.stderr) {
+                return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+            }
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "container inspect failed (exit={}): {}",
+                result.exit_code,
+                stderr_summary(&result.stderr)
+            )));
+        }
+
+        let (template, created_at) =
+            match serde_json::from_slice::<serde_json::Value>(&result.stdout) {
+                Ok(value) => {
+                    let template = value
+                        .as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(|entry| entry.get("image"))
+                        .and_then(|image| image.as_str())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let created_at = value
+                        .as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(|entry| entry.get("createdAt"))
+                        .and_then(|created| created.as_str())
+                        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now);
+                    (template, created_at)
+                }
+                Err(_) => ("unknown".to_string(), Utc::now()),
+            };
+
+        Ok(SandboxInfo {
+            id: sandbox_id.clone(),
+            template,
+            state: SandboxState::Ready,
+            created_at,
+        })
     }
 }
 
@@ -624,12 +740,12 @@ impl SandboxBackend for AppleVzBackend {
     ) -> Result<hyperbox_core::ExecOutcome> {
         let exec_started = std::time::Instant::now();
 
-        let direct_container = {
+        let (direct_container, has_entry) = {
             let sandboxes = self.sandboxes.lock().await;
-            let sandbox = sandboxes
-                .get(sandbox_id)
-                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
-            sandbox.direct_container.clone()
+            match sandboxes.get(sandbox_id) {
+                Some(sandbox) => (sandbox.direct_container.clone(), true),
+                None => (None, false),
+            }
         };
 
         if let Some(direct) = direct_container {
@@ -643,6 +759,31 @@ impl SandboxBackend for AppleVzBackend {
                 "apple backend exec completed via direct container path"
             );
             return Ok(outcome);
+        }
+
+        if !has_entry && self.direct_container_bin.is_some() {
+            match self.inspect_container_fallback(sandbox_id).await {
+                Ok(_) => {
+                    let container_name = format!("hyperbox-{}", sandbox_id.0);
+                    let outcome = self.exec_in_container(&container_name, req.clone()).await?;
+                    info!(
+                        sandbox_id = %sandbox_id.0,
+                        stage = "exec_direct_fallback",
+                        helper_exec_ms = outcome.duration_ms as u64,
+                        backend_elapsed_ms = exec_started.elapsed().as_millis() as u64,
+                        exit_code = outcome.exit_code,
+                        "apple backend exec completed via recovered direct container path"
+                    );
+                    return Ok(outcome);
+                }
+                Err(HyperboxError::SandboxNotFound(_)) => {
+                    debug!(
+                        sandbox_id = %sandbox_id.0,
+                        "apple backend direct fallback miss; trying helper/agent path"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         if self.config.launch_command.is_some() {
@@ -718,18 +859,35 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
-        let direct_container = {
+        let (direct_container, has_entry) = {
             let sandboxes = self.sandboxes.lock().await;
-            let sandbox = sandboxes
-                .get(sandbox_id)
-                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
-            sandbox.direct_container.clone()
+            match sandboxes.get(sandbox_id) {
+                Some(sandbox) => (sandbox.direct_container.clone(), true),
+                None => (None, false),
+            }
         };
 
         if let Some(direct) = direct_container {
             return self
                 .read_file_direct(&direct, path, DEFAULT_IO_TIMEOUT_SECS)
                 .await;
+        }
+
+        if !has_entry && self.direct_container_bin.is_some() {
+            let container_name = format!("hyperbox-{}", sandbox_id.0);
+            match self
+                .read_file_in_container(&container_name, path, DEFAULT_IO_TIMEOUT_SECS)
+                .await
+            {
+                Ok(payload) => return Ok(payload),
+                Err(HyperboxError::SandboxNotFound(_)) => {
+                    debug!(
+                        sandbox_id = %sandbox_id.0,
+                        "apple backend direct read fallback miss; trying helper/agent path"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         if self.config.launch_command.is_some() {
@@ -780,18 +938,35 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
-        let direct_container = {
+        let (direct_container, has_entry) = {
             let sandboxes = self.sandboxes.lock().await;
-            let sandbox = sandboxes
-                .get(sandbox_id)
-                .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
-            sandbox.direct_container.clone()
+            match sandboxes.get(sandbox_id) {
+                Some(sandbox) => (sandbox.direct_container.clone(), true),
+                None => (None, false),
+            }
         };
 
         if let Some(direct) = direct_container {
             return self
                 .write_file_direct(&direct, payload, DEFAULT_IO_TIMEOUT_SECS)
                 .await;
+        }
+
+        if !has_entry && self.direct_container_bin.is_some() {
+            let container_name = format!("hyperbox-{}", sandbox_id.0);
+            match self
+                .write_file_in_container(&container_name, payload.clone(), DEFAULT_IO_TIMEOUT_SECS)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(HyperboxError::SandboxNotFound(_)) => {
+                    debug!(
+                        sandbox_id = %sandbox_id.0,
+                        "apple backend direct write fallback miss; trying helper/agent path"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         if self.config.launch_command.is_some() {
@@ -1015,30 +1190,38 @@ impl SandboxBackend for AppleVzBackend {
 
     async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
         let destroy_started = std::time::Instant::now();
-        let sandbox = self
-            .sandboxes
-            .lock()
-            .await
-            .remove(sandbox_id)
-            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))?;
+        let sandbox = self.sandboxes.lock().await.remove(sandbox_id);
 
-        if let Some(direct) = sandbox.direct_container {
-            self.destroy_direct_container(direct).await?;
-        } else if self.config.launch_command.is_some() {
-            if let Err(err) = self
-                .helper_request(&HelperRequest::Destroy {
-                    sandbox_id: sandbox_id.0.to_string(),
-                })
-                .await
-            {
-                warn!(
-                    sandbox_id = %sandbox_id.0,
-                    error = %err,
-                    "apple backend failed to destroy sandbox via helper"
-                );
-                return Err(err);
+        if let Some(sandbox) = sandbox {
+            if let Some(direct) = sandbox.direct_container {
+                self.destroy_direct_container(direct).await?;
+            } else if self.config.launch_command.is_some() {
+                if let Err(err) = self
+                    .helper_request(&HelperRequest::Destroy {
+                        sandbox_id: sandbox_id.0.to_string(),
+                    })
+                    .await
+                {
+                    warn!(
+                        sandbox_id = %sandbox_id.0,
+                        error = %err,
+                        "apple backend failed to destroy sandbox via helper"
+                    );
+                    return Err(err);
+                }
             }
+        } else if self.direct_container_bin.is_some() {
+            // Restart recovery path for built-in helper sessions.
+            let container_name = format!("hyperbox-{}", sandbox_id.0);
+            self.destroy_container_by_name(&container_name).await?;
+            let dns_container = format!("{ALLOWLIST_DNS_PREFIX}{}", sandbox_id.0);
+            let _ = self.destroy_container_by_name(&dns_container).await;
+            let network_name = format!("{ALLOWLIST_NETWORK_PREFIX}{}", sandbox_id.0);
+            let _ = self.delete_network_if_present(&network_name).await;
+        } else {
+            return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
         }
+
         info!(
             sandbox_id = %sandbox_id.0,
             stage = "destroy",
@@ -1050,15 +1233,18 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn inspect(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
-        self.sandboxes
-            .lock()
-            .await
-            .get(sandbox_id)
-            .map(|sandbox| {
-                let _ = &sandbox.config;
-                sandbox.info.clone()
-            })
-            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
+        if let Some(info) = self.sandboxes.lock().await.get(sandbox_id).map(|sandbox| {
+            let _ = &sandbox.config;
+            sandbox.info.clone()
+        }) {
+            return Ok(info);
+        }
+
+        if self.direct_container_bin.is_some() {
+            return self.inspect_container_fallback(sandbox_id).await;
+        }
+
+        Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
     }
 }
 
@@ -1114,6 +1300,17 @@ fn truncate_error_output(raw: &str) -> String {
 
 fn stderr_summary(stderr: &[u8]) -> String {
     truncate_error_output(&String::from_utf8_lossy(stderr))
+}
+
+fn error_output_is_not_found(stderr: &[u8]) -> bool {
+    let normalized = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    normalized.contains("not found") || normalized.contains("no such")
+}
+
+fn container_output_is_not_found(stderr: &[u8]) -> bool {
+    let normalized = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    normalized.contains("container")
+        && (normalized.contains("not found") || normalized.contains("no such"))
 }
 
 async fn run_container_command(

@@ -38,6 +38,8 @@ $HB run --cmd "python3 -c 'print(2 + 2)'"
 
 ### 3) Allow exactly one domain, and verify inverse blocking
 
+Note: on some macOS hosts, `allowlist` may be unavailable. If Hyperbox reports that, use `network=none|full` for now and run `hyperbox setup` to check host prerequisites.
+
 ```bash
 $HB run --network allowlist --allow example.com \
   --cmd "python3 -c \"import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=8).status)\""
@@ -47,6 +49,8 @@ $HB run --network allowlist --allow example.com \
 ```
 
 The second command should fail because `github.com` is not allowlisted.
+
+Tip: add `--explain` to see effective backend mode and enforcement details for your host.
 
 ### 4) Keep state between runs (install once, reuse)
 
@@ -70,6 +74,7 @@ $HB run --profile full --cmd "pytest -q"
 - `none`: no external network access
 - `allowlist`: explicit hostnames only (wildcards not supported)
 - `full`: unrestricted network
+- Allowlist availability can vary by host/runtime capabilities; `--explain` shows effective enforcement.
 
 ### Workspace model
 
@@ -113,7 +118,7 @@ Additional crate roles:
 
 | Platform | Backend | Status | Notes |
 | --- | --- | --- | --- |
-| macOS (Apple Silicon) | Apple backend (`auto`) | Supported | Uses helper-managed runtime; allowlist currently DNS/domain-based |
+| macOS (Apple Silicon) | Apple backend (`auto`) | Supported | Backend selected automatically; allowlist availability depends on host/runtime capabilities |
 | Linux (KVM-capable) | Firecracker backend (`auto`) | Supported | Enforces firewall-based policies when firewall enforcement is enabled |
 | Any OS | Local backend (`HYPERBOX_BACKEND=local`) | Dev-only fallback | Not isolated like VM backends; not recommended for production isolation |
 
@@ -273,7 +278,7 @@ $HB run --profile full --cmd "pytest -q"
 ## Security Notes and Current Limits
 
 - Allowlist entries are explicit hostnames only; wildcard patterns are rejected.
-- On macOS built-in helper path, allowlist enforcement is currently DNS/domain-based (host-level direct-IP firewall blocking is not yet implemented).
+- On macOS, allowlist enforcement is currently DNS/domain-based (host-level direct-IP firewall blocking is not yet implemented).
 - `--workspace` intentionally maps host files into sandbox context; writes there are host-visible by design.
 - `HYPERBOX_BACKEND=local` is a non-isolated fallback intended for local development/testing only.
 

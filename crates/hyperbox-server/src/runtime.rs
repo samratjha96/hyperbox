@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, info, warn};
 
 use hyperbox_core::{
@@ -17,6 +17,7 @@ pub struct HyperboxServer {
     sandboxes: Arc<Mutex<HashMap<SandboxId, SandboxConfig>>>,
     metrics: MetricsCollector,
     snapshots: Arc<dyn SnapshotStore>,
+    hydration_complete: Arc<OnceCell<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ impl HyperboxServer {
             sandboxes: Arc::new(Mutex::new(HashMap::new())),
             metrics: MetricsCollector::default(),
             snapshots,
+            hydration_complete: Arc::new(OnceCell::new()),
         }
     }
 
@@ -64,7 +66,51 @@ impl HyperboxServer {
             .collect()
     }
 
+    async fn ensure_hydrated(&self) -> Result<()> {
+        self.hydration_complete
+            .get_or_try_init(|| async {
+                let records = self.snapshots.list_active_sandboxes().await?;
+                let mut retry_needed = false;
+                for record in records {
+                    let sandbox_id = record.sandbox_id.clone();
+                    match self.backend.inspect(&sandbox_id).await {
+                        Ok(_) => {
+                            self.sandboxes
+                                .lock()
+                                .await
+                                .insert(sandbox_id, record.config.clone());
+                        }
+                        Err(err) => {
+                            if matches!(err, HyperboxError::SandboxNotFound(_)) {
+                                warn!(
+                                    sandbox_id = %record.sandbox_id.0,
+                                    error = %err,
+                                    "hydration could not verify sandbox; keeping persisted record"
+                                );
+                            } else {
+                                retry_needed = true;
+                                warn!(
+                                    sandbox_id = %record.sandbox_id.0,
+                                    error = %err,
+                                    "hydration encountered transient failure; will retry"
+                                );
+                            }
+                        }
+                    }
+                }
+                if retry_needed {
+                    return Err(HyperboxError::ExecutionFailed(
+                        "hydration incomplete; retrying on next request".to_string(),
+                    ));
+                }
+                Ok(())
+            })
+            .await
+            .map(|_| ())
+    }
+
     pub async fn create_sandbox(&self, config: SandboxConfig) -> Result<SandboxInfo> {
+        self.ensure_hydrated().await?;
         self.templates.ensure_exists(&config.template)?;
         info!(
             template = %config.template,
@@ -76,6 +122,9 @@ impl HyperboxServer {
         if let Some(name) = config.affinity_name.as_deref() {
             self.snapshots.bind_sandbox(name, &lease.id).await?;
         }
+        self.snapshots
+            .upsert_active_sandbox(&lease.id, &config, lease.info.created_at)
+            .await?;
         self.sandboxes.lock().await.insert(lease.id.clone(), config);
         self.metrics.inc_create();
         info!(sandbox_id = %lease.id.0, template = %lease.info.template, "runtime sandbox created");
@@ -83,6 +132,7 @@ impl HyperboxServer {
     }
 
     pub async fn exec(&self, sandbox_id: &SandboxId, request: ExecRequest) -> Result<ExecOutcome> {
+        self.ensure_hydrated().await?;
         debug!(
             sandbox_id = %sandbox_id.0,
             timeout_secs = request.timeout_secs,
@@ -110,10 +160,14 @@ impl HyperboxServer {
     }
 
     pub async fn inspect(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
+        self.ensure_hydrated().await?;
         self.backend.inspect(sandbox_id).await
     }
 
     pub async fn list_sandboxes(&self) -> Vec<ActiveSandboxInfo> {
+        if let Err(err) = self.ensure_hydrated().await {
+            warn!(error = %err, "runtime list_sandboxes proceeding without hydration");
+        }
         let entries: Vec<(SandboxId, Option<String>)> = self
             .sandboxes
             .lock()
@@ -143,18 +197,22 @@ impl HyperboxServer {
     }
 
     pub async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
+        self.ensure_hydrated().await?;
         self.backend.read_file(sandbox_id, path).await
     }
 
     pub async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
+        self.ensure_hydrated().await?;
         self.backend.write_file(sandbox_id, payload).await
     }
 
     pub async fn destroy_sandbox(&self, sandbox_id: &SandboxId) -> Result<()> {
+        self.ensure_hydrated().await?;
         info!(sandbox_id = %sandbox_id.0, "runtime destroy_sandbox");
         self.backend.destroy(sandbox_id).await?;
         self.sandboxes.lock().await.remove(sandbox_id);
         self.snapshots.clear_sandbox_binding(sandbox_id).await?;
+        self.snapshots.remove_active_sandbox(sandbox_id).await?;
         self.metrics.inc_destroy();
         info!(sandbox_id = %sandbox_id.0, "runtime sandbox destroyed");
         Ok(())
@@ -173,6 +231,7 @@ impl HyperboxServer {
         sandbox_id: &SandboxId,
         note: Option<String>,
     ) -> Result<SnapshotMetadata> {
+        self.ensure_hydrated().await?;
         info!(sandbox_id = %sandbox_id.0, note = ?note, "runtime create_snapshot");
         let sandbox = self
             .sandboxes
@@ -201,6 +260,7 @@ impl HyperboxServer {
     }
 
     pub async fn restore_snapshot(&self, snapshot_id: &SnapshotId) -> Result<SandboxInfo> {
+        self.ensure_hydrated().await?;
         warn!(snapshot_id = %snapshot_id.0, "runtime restore_snapshot requested");
         let snapshot = self
             .snapshots
@@ -211,30 +271,35 @@ impl HyperboxServer {
             })?;
 
         let artifact_path = snapshot_artifact_path(snapshot_id)?;
-        if artifact_path.exists() {
-            let lease = self
-                .backend
-                .restore_snapshot(snapshot_id, &artifact_path, snapshot.config.clone())
-                .await?;
-            if let Some(name) = snapshot.config.affinity_name.as_deref() {
-                self.snapshots.bind_sandbox(name, &lease.id).await?;
-            }
-            self.sandboxes
-                .lock()
-                .await
-                .insert(lease.id.clone(), snapshot.config.clone());
-            self.metrics.inc_create();
-            warn!(snapshot_id = %snapshot_id.0, sandbox_id = %lease.id.0, "runtime restore_snapshot restored sandbox from artifact");
-            return Ok(lease.info);
+        if !artifact_path.exists() {
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "snapshot artifact missing for {} at {}",
+                snapshot_id.0,
+                artifact_path.display()
+            )));
         }
 
-        self.create_sandbox(snapshot.config.clone()).await.map(|info| {
-            warn!(snapshot_id = %snapshot_id.0, sandbox_id = %info.id.0, "runtime restore_snapshot created replacement sandbox (no artifact)");
-            info
-        })
+        let lease = self
+            .backend
+            .restore_snapshot(snapshot_id, &artifact_path, snapshot.config.clone())
+            .await?;
+        if let Some(name) = snapshot.config.affinity_name.as_deref() {
+            self.snapshots.bind_sandbox(name, &lease.id).await?;
+        }
+        self.snapshots
+            .upsert_active_sandbox(&lease.id, &snapshot.config, lease.info.created_at)
+            .await?;
+        self.sandboxes
+            .lock()
+            .await
+            .insert(lease.id.clone(), snapshot.config.clone());
+        self.metrics.inc_create();
+        warn!(snapshot_id = %snapshot_id.0, sandbox_id = %lease.id.0, "runtime restore_snapshot restored sandbox from artifact");
+        Ok(lease.info)
     }
 
     pub async fn list_snapshots(&self, template: &str) -> Result<Vec<SnapshotMetadata>> {
+        self.ensure_hydrated().await?;
         self.snapshots.list_for_template(template).await
     }
 
@@ -243,6 +308,7 @@ impl HyperboxServer {
         name: &str,
         restore_if_needed: bool,
     ) -> Result<(SandboxInfo, bool)> {
+        self.ensure_hydrated().await?;
         let affinity =
             self.snapshots.get_affinity(name).await?.ok_or_else(|| {
                 HyperboxError::ExecutionFailed(format!("affinity not found: {name}"))
@@ -288,6 +354,7 @@ fn snapshot_artifact_path(snapshot_id: &SnapshotId) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::LocalBackend;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn server_lifecycle_works() {
@@ -348,5 +415,33 @@ mod tests {
             rows.iter()
                 .any(|row| row.affinity_name.as_deref() == Some("list-test"))
         );
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_fails_when_artifact_is_missing() {
+        let backend = Arc::new(LocalBackend::new(Some(
+            std::env::temp_dir().join("hyperbox-server-restore-missing-artifact"),
+        )));
+        let snapshots = Arc::new(crate::InMemorySnapshotStore::default());
+        let server = HyperboxServer::new_with_snapshots(backend, snapshots.clone());
+
+        let info = server
+            .create_sandbox(SandboxConfig::default())
+            .await
+            .expect("create sandbox");
+        let snapshot = snapshots
+            .create_snapshot(
+                &info.id,
+                &SandboxConfig::default(),
+                Some("no-artifact".to_string()),
+            )
+            .await
+            .expect("create metadata only snapshot");
+
+        let err = server
+            .restore_snapshot(&snapshot.id)
+            .await
+            .expect_err("restore should fail when artifact is missing");
+        assert!(err.to_string().contains("snapshot artifact missing"));
     }
 }

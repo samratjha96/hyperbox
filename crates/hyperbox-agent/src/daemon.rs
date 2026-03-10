@@ -1,4 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, pin::Pin, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
+    time::Instant,
+};
 
 use tokio::{
     fs,
@@ -45,6 +51,88 @@ impl AgentService {
         sandboxes.insert(sandbox_id.to_string(), AgentSandbox { root: dir.clone() });
         info!(sandbox_id = %sandbox_id, root = %dir.display(), "agent sandbox root initialized");
         Ok(dir)
+    }
+
+    fn normalize_relative_path(path: &str) -> Result<PathBuf, Status> {
+        let candidate = Path::new(path);
+        if candidate.is_absolute() {
+            return Err(Status::invalid_argument(
+                "path must be relative to sandbox root",
+            ));
+        }
+
+        let mut normalized = PathBuf::new();
+        for component in candidate.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => normalized.push(part),
+                Component::ParentDir => {
+                    return Err(Status::invalid_argument(
+                        "path traversal outside sandbox root is not allowed",
+                    ));
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(Status::invalid_argument("invalid path"));
+                }
+            }
+        }
+
+        if normalized.as_os_str().is_empty() {
+            return Err(Status::invalid_argument("path cannot be empty"));
+        }
+        Ok(normalized)
+    }
+
+    async fn resolve_safe_path(
+        root: &Path,
+        raw_path: &str,
+        create_parents: bool,
+    ) -> Result<PathBuf, Status> {
+        let normalized = Self::normalize_relative_path(raw_path)?;
+        let mut cursor = root.to_path_buf();
+        let components: Vec<_> = normalized.components().collect();
+
+        for (idx, component) in components.iter().enumerate() {
+            let part = match component {
+                Component::Normal(part) => part,
+                _ => return Err(Status::invalid_argument("invalid path component")),
+            };
+            let next = cursor.join(part);
+            let is_last = idx + 1 == components.len();
+
+            match fs::symlink_metadata(&next).await {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        return Err(Status::permission_denied(
+                            "symlink paths are not allowed in sandbox file operations",
+                        ));
+                    }
+                    if !is_last && !meta.is_dir() {
+                        return Err(Status::failed_precondition(
+                            "path component is not a directory",
+                        ));
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    if !is_last {
+                        if create_parents {
+                            fs::create_dir(&next).await.map_err(|e| {
+                                Status::internal(format!("create directory failed: {e}"))
+                            })?;
+                        } else {
+                            return Err(Status::not_found("path not found"));
+                        }
+                    }
+                }
+                Err(err) => {
+                    return Err(Status::internal(format!("inspect path failed: {err}")));
+                }
+            }
+
+            cursor = next;
+        }
+
+        Ok(cursor)
     }
 }
 
@@ -124,11 +212,12 @@ impl HyperboxAgent for AgentService {
         };
         debug!(peer = ?peer, sandbox_id = %sandbox_id, path = %request.path, "agent read_file request");
         let root = self.sandbox_root(sandbox_id).await?;
-        let full = root.join(request.path);
+        let full = Self::resolve_safe_path(&root, &request.path, false).await?;
 
-        let bytes = fs::read(full)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let bytes = fs::read(full).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Status::not_found(e.to_string()),
+            _ => Status::internal(e.to_string()),
+        })?;
         Ok(Response::new(pb::ReadFileResponse { bytes }))
     }
 
@@ -151,13 +240,7 @@ impl HyperboxAgent for AgentService {
             "agent write_file request"
         );
         let root = self.sandbox_root(sandbox_id).await?;
-        let full = root.join(request.path);
-
-        if let Some(parent) = full.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
-        }
+        let full = Self::resolve_safe_path(&root, &request.path, true).await?;
 
         fs::write(full, request.bytes)
             .await
@@ -401,4 +484,30 @@ pub async fn serve_agent(addr: std::net::SocketAddr, root: PathBuf) -> anyhow::R
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentService;
+
+    #[test]
+    fn normalize_relative_path_rejects_unsafe_inputs() {
+        assert!(AgentService::normalize_relative_path("/etc/passwd").is_err());
+        assert!(AgentService::normalize_relative_path("../secret").is_err());
+        assert!(AgentService::normalize_relative_path("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_safe_path_blocks_symlink_traversal() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let escape_target = tempfile::tempdir().expect("escape target");
+        let link_path = root.path().join("link");
+        std::os::unix::fs::symlink(escape_target.path(), &link_path).expect("create symlink");
+
+        let err = AgentService::resolve_safe_path(root.path(), "link/file.txt", true)
+            .await
+            .expect_err("symlink traversal should fail");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
 }

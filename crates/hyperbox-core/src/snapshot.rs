@@ -39,6 +39,13 @@ pub struct AffinityRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveSandboxRecord {
+    pub sandbox_id: SandboxId,
+    pub config: SandboxConfig,
+    pub created_at: DateTime<Utc>,
+}
+
 #[async_trait]
 pub trait SnapshotStore: Send + Sync {
     async fn create_snapshot(
@@ -59,4 +66,15 @@ pub trait SnapshotStore: Send + Sync {
     async fn set_affinity_snapshot(&self, name: &str, snapshot_id: &SnapshotId) -> Result<()>;
 
     async fn get_affinity(&self, name: &str) -> Result<Option<AffinityRecord>>;
+
+    async fn upsert_active_sandbox(
+        &self,
+        sandbox_id: &SandboxId,
+        config: &SandboxConfig,
+        created_at: DateTime<Utc>,
+    ) -> Result<()>;
+
+    async fn remove_active_sandbox(&self, sandbox_id: &SandboxId) -> Result<()>;
+
+    async fn list_active_sandboxes(&self) -> Result<Vec<ActiveSandboxRecord>>;
 }

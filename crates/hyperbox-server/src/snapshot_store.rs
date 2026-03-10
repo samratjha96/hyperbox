@@ -5,14 +5,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    AffinityRecord, HyperboxError, Result, SandboxConfig, SandboxId, SnapshotId, SnapshotMetadata,
-    SnapshotStore,
+    ActiveSandboxRecord, AffinityRecord, HyperboxError, Result, SandboxConfig, SandboxId,
+    SnapshotId, SnapshotMetadata, SnapshotStore,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct InMemorySnapshotStore {
     snapshots: Arc<Mutex<HashMap<SnapshotId, SnapshotMetadata>>>,
     affinities: Arc<Mutex<HashMap<String, AffinityRecord>>>,
+    active: Arc<Mutex<HashMap<SandboxId, ActiveSandboxRecord>>>,
 }
 
 #[async_trait::async_trait]
@@ -104,6 +105,32 @@ impl SnapshotStore for InMemorySnapshotStore {
     async fn get_affinity(&self, name: &str) -> Result<Option<AffinityRecord>> {
         Ok(self.affinities.lock().await.get(name).cloned())
     }
+
+    async fn upsert_active_sandbox(
+        &self,
+        sandbox_id: &SandboxId,
+        config: &SandboxConfig,
+        created_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.active.lock().await.insert(
+            sandbox_id.clone(),
+            ActiveSandboxRecord {
+                sandbox_id: sandbox_id.clone(),
+                config: config.clone(),
+                created_at,
+            },
+        );
+        Ok(())
+    }
+
+    async fn remove_active_sandbox(&self, sandbox_id: &SandboxId) -> Result<()> {
+        self.active.lock().await.remove(sandbox_id);
+        Ok(())
+    }
+
+    async fn list_active_sandboxes(&self) -> Result<Vec<ActiveSandboxRecord>> {
+        Ok(self.active.lock().await.values().cloned().collect())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +185,12 @@ impl SqliteSnapshotStore {
               sandbox_id TEXT,
               snapshot_id TEXT,
               updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS active_sandboxes (
+              sandbox_id TEXT PRIMARY KEY,
+              config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
             );
             ",
         )
@@ -348,6 +381,69 @@ impl SnapshotStore for SqliteSnapshotStore {
             .map_err(sql_err)
         })
     }
+
+    async fn upsert_active_sandbox(
+        &self,
+        sandbox_id: &SandboxId,
+        config: &SandboxConfig,
+        created_at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO active_sandboxes (sandbox_id, config_json, created_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(sandbox_id) DO UPDATE SET
+                   config_json = excluded.config_json,
+                   created_at = excluded.created_at",
+                params![
+                    sandbox_id.0.to_string(),
+                    serde_json::to_string(config)?,
+                    created_at.to_rfc3339(),
+                ],
+            )
+            .map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
+    async fn remove_active_sandbox(&self, sandbox_id: &SandboxId) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM active_sandboxes WHERE sandbox_id = ?1",
+                params![sandbox_id.0.to_string()],
+            )
+            .map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
+    async fn list_active_sandboxes(&self) -> Result<Vec<ActiveSandboxRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT sandbox_id, config_json, created_at
+                     FROM active_sandboxes ORDER BY created_at ASC",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let sandbox_id: String = row.get(0)?;
+                    let config_json: String = row.get(1)?;
+                    let created_at: String = row.get(2)?;
+
+                    Ok(ActiveSandboxRecord {
+                        sandbox_id: SandboxId(parse_uuid(&sandbox_id)?),
+                        config: serde_json::from_str::<SandboxConfig>(&config_json)
+                            .map_err(to_sql_error)?,
+                        created_at: parse_rfc3339_utc(&created_at).map_err(to_sql_error)?,
+                    })
+                })
+                .map_err(sql_err)?;
+
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sql_err)
+        })
+    }
 }
 
 fn parse_uuid(raw: &str) -> rusqlite::Result<uuid::Uuid> {
@@ -427,5 +523,40 @@ mod tests {
             .expect("affinity exists");
         assert_eq!(affinity.sandbox_id, Some(sandbox_id));
         assert_eq!(affinity.snapshot_id, Some(snapshot.id));
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_persists_active_sandbox_records() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let db_path = root.path().join("state.db");
+        let store = SqliteSnapshotStore::open(db_path).expect("open sqlite store");
+
+        let sandbox_id = SandboxId::new();
+        let config = SandboxConfig::default();
+        let created_at = Utc::now();
+        store
+            .upsert_active_sandbox(&sandbox_id, &config, created_at)
+            .await
+            .expect("upsert active sandbox");
+
+        let listed = store
+            .list_active_sandboxes()
+            .await
+            .expect("list active sandboxes");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].sandbox_id, sandbox_id);
+        assert_eq!(listed[0].config.template, config.template);
+
+        store
+            .remove_active_sandbox(&listed[0].sandbox_id)
+            .await
+            .expect("remove active sandbox");
+        assert!(
+            store
+                .list_active_sandboxes()
+                .await
+                .expect("list active sandboxes after delete")
+                .is_empty()
+        );
     }
 }
