@@ -512,7 +512,10 @@ impl SnapshotStore for SqliteSnapshotStore {
                 params![
                     process.id.0.to_string(),
                     process.sandbox_id.0.to_string(),
-                    process.requested_sandbox_id.as_ref().map(|id| id.0.to_string()),
+                    process
+                        .requested_sandbox_id
+                        .as_ref()
+                        .map(|id| id.0.to_string()),
                     serde_json::to_string(&process.disposition)?,
                     serde_json::to_string(&process.command)?,
                     serde_json::to_string(&process.status)?,
@@ -745,7 +748,11 @@ mod tests {
             sandbox_id: SandboxId::new(),
             requested_sandbox_id: None,
             disposition: ProcessDisposition::CreatedNew,
-            command: vec!["/bin/sh".to_string(), "-lc".to_string(), "echo ok".to_string()],
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "echo ok".to_string(),
+            ],
             status: ProcessStatus::Running,
             stdout_path: ".hyperbox/processes/stdout.log".to_string(),
             stderr_path: ".hyperbox/processes/stderr.log".to_string(),
@@ -756,10 +763,7 @@ mod tests {
             expires_at: None,
         };
 
-        store
-            .upsert_process(&record)
-            .await
-            .expect("upsert process");
+        store.upsert_process(&record).await.expect("upsert process");
 
         let found = store
             .get_process(&record.id)

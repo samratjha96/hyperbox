@@ -72,7 +72,10 @@ impl ProcessStatus {
     pub fn can_transition_to(&self, next: Self) -> bool {
         match self {
             Self::Starting => matches!(next, Self::Running | Self::Failed),
-            Self::Running => matches!(next, Self::Succeeded | Self::Failed | Self::Cancelled | Self::Lost),
+            Self::Running => matches!(
+                next,
+                Self::Succeeded | Self::Failed | Self::Cancelled | Self::Lost
+            ),
             Self::Succeeded | Self::Failed | Self::Cancelled | Self::Lost => false,
         }
     }
@@ -93,6 +96,15 @@ pub struct ProcessInfo {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessLogRead {
+    pub stream: StreamName,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub eof: bool,
+    pub contents: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
