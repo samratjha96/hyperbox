@@ -58,6 +58,7 @@ message InspectSandboxRequest {
 
 message InspectSandboxResponse {
   SandboxInfo info = 1;
+  SandboxConfig config = 2;
 }
 
 message ListSandboxesRequest {}

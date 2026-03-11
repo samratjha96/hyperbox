@@ -394,6 +394,16 @@ impl HyperboxServer {
         self.backend.inspect(sandbox_id).await
     }
 
+    pub async fn sandbox_config(&self, sandbox_id: &SandboxId) -> Result<SandboxConfig> {
+        self.ensure_hydrated().await?;
+        self.sandboxes
+            .lock()
+            .await
+            .get(sandbox_id)
+            .cloned()
+            .ok_or_else(|| HyperboxError::SandboxNotFound(sandbox_id.0.to_string()))
+    }
+
     pub async fn list_sandboxes(&self) -> Vec<ActiveSandboxInfo> {
         if let Err(err) = self.ensure_hydrated().await {
             warn!(error = %err, "runtime list_sandboxes proceeding without hydration");

@@ -150,6 +150,26 @@ fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
     }
 }
 
+fn into_proto_config(config: SandboxConfig) -> pb::SandboxConfig {
+    let (network_mode, network_allowlist) = match config.network {
+        NetworkMode::None => (pb::NetworkMode::None as i32, Vec::new()),
+        NetworkMode::Allowlist(domains) => (pb::NetworkMode::Allowlist as i32, domains),
+        NetworkMode::Full => (pb::NetworkMode::Full as i32, Vec::new()),
+    };
+
+    pb::SandboxConfig {
+        template: config.template,
+        memory_mb: config.memory_mb,
+        vcpu_count: config.vcpu_count as u32,
+        timeout_secs: config.timeout_secs,
+        env: config.env.into_iter().collect(),
+        network_mode,
+        network_allowlist,
+        workspace_dir: config.workspace_dir.unwrap_or_default(),
+        affinity_name: config.affinity_name.unwrap_or_default(),
+    }
+}
+
 impl From<crate::MetricsSnapshot> for pb::MetricsResponse {
     fn from(value: crate::MetricsSnapshot) -> Self {
         Self {
@@ -348,6 +368,12 @@ impl HyperboxControl for GrpcControlService {
 
         Ok(Response::new(pb::InspectSandboxResponse {
             info: Some(into_proto_info(info)),
+            config: Some(into_proto_config(
+                self.runtime.sandbox_config(&sandbox_id).await.map_err(|e| {
+                    error!(peer = ?peer, sandbox_id = %sandbox_id.0, error = %e, "grpc inspect_sandbox config lookup failed");
+                    Status::internal(e.to_string())
+                })?,
+            )),
         }))
     }
 

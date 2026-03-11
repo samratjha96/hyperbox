@@ -29,6 +29,12 @@ pub struct ActiveSandboxInfo {
     pub affinity_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SandboxDetails {
+    pub info: SandboxInfo,
+    pub config: SandboxConfig,
+}
+
 fn parse_process_info(info: pb::ProcessInfo) -> anyhow::Result<ProcessInfo> {
     Ok(ProcessInfo {
         id: ProcessId(uuid::Uuid::parse_str(&info.process_id)?),
@@ -321,22 +327,65 @@ impl GrpcControlClient {
         &mut self,
         sandbox_id: &hyperbox_core::SandboxId,
     ) -> anyhow::Result<SandboxInfo> {
-        let info = self
+        Ok(self.inspect_sandbox_details(sandbox_id).await?.info)
+    }
+
+    pub async fn inspect_sandbox_details(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+    ) -> anyhow::Result<SandboxDetails> {
+        let response = self
             .inner
             .inspect_sandbox(pb::InspectSandboxRequest {
                 sandbox_id: sandbox_id.0.to_string(),
             })
             .await?
-            .into_inner()
+            .into_inner();
+        let info = response
             .info
             .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?;
+        let config = response
+            .config
+            .ok_or_else(|| anyhow::anyhow!("missing sandbox config"))?;
 
-        Ok(SandboxInfo {
-            id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
-            template: info.template,
-            state: hyperbox_core::SandboxState::Ready,
-            created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
-                .with_timezone(&chrono::Utc),
+        Ok(SandboxDetails {
+            info: SandboxInfo {
+                id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
+                template: info.template,
+                state: match info.state.as_str() {
+                    "Provisioning" => hyperbox_core::SandboxState::Provisioning,
+                    "Busy" => hyperbox_core::SandboxState::Busy,
+                    "Stopped" => hyperbox_core::SandboxState::Stopped,
+                    "Failed" => hyperbox_core::SandboxState::Failed,
+                    _ => hyperbox_core::SandboxState::Ready,
+                },
+                created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+                    .with_timezone(&chrono::Utc),
+            },
+            config: SandboxConfig {
+                affinity_name: if config.affinity_name.is_empty() {
+                    None
+                } else {
+                    Some(config.affinity_name)
+                },
+                template: config.template,
+                memory_mb: config.memory_mb,
+                vcpu_count: config.vcpu_count as u8,
+                workspace_dir: if config.workspace_dir.is_empty() {
+                    None
+                } else {
+                    Some(config.workspace_dir)
+                },
+                network: match pb::NetworkMode::try_from(config.network_mode)
+                    .unwrap_or(pb::NetworkMode::None)
+                {
+                    pb::NetworkMode::Allowlist => NetworkMode::Allowlist(config.network_allowlist),
+                    pb::NetworkMode::Full => NetworkMode::Full,
+                    _ => NetworkMode::None,
+                },
+                env: config.env.into_iter().collect(),
+                timeout_secs: config.timeout_secs,
+            },
         })
     }
 

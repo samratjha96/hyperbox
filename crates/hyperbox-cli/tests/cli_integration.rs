@@ -254,3 +254,57 @@ fn detached_run_can_be_waited_and_logged() {
     assert!(logs.status.success());
     assert!(String::from_utf8_lossy(&logs.stdout).contains("detached-cli"));
 }
+
+#[test]
+fn run_creates_new_sandbox_when_target_is_busy() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let created = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "create",
+            "--name",
+            "busy-demo",
+            "--template",
+            "python:3.12",
+        ])
+        .output()
+        .expect("create named sandbox");
+    assert!(created.status.success());
+
+    let first = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "run",
+            "--name",
+            "busy-demo",
+            "--cmd",
+            "sleep 10",
+            "--detach",
+        ])
+        .output()
+        .expect("start first process");
+    assert!(first.status.success());
+
+    let second = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "run",
+            "--name",
+            "busy-demo",
+            "--cmd",
+            "printf overflow-ok",
+        ])
+        .output()
+        .expect("run second process");
+
+    let _ = server.kill();
+    assert!(second.status.success());
+    assert!(String::from_utf8_lossy(&second.stdout).contains("overflow-ok"));
+    assert!(String::from_utf8_lossy(&second.stderr).contains("created a new sandbox"));
+}
