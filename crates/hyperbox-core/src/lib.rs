@@ -10,7 +10,10 @@ pub use backend::{FilePayload, SandboxBackend, SandboxLease};
 pub use config::{NetworkMode, SandboxConfig};
 pub use error::{HyperboxError, Result};
 pub use model::{ExecOutcome, ExecRequest, SandboxId, SandboxInfo, SandboxState, StreamEvent};
-pub use process::{ExecStatus, ExecTrace, StreamChunk, StreamName};
+pub use process::{
+    ExecStatus, ExecTrace, ProcessDisposition, ProcessId, ProcessInfo, ProcessStatus,
+    StreamChunk, StreamName,
+};
 pub use snapshot::{
     ActiveSandboxRecord, AffinityRecord, SnapshotId, SnapshotMetadata, SnapshotStore,
 };

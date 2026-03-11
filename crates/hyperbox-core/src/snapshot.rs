@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Result, SandboxConfig, SandboxId};
+use crate::{ProcessId, ProcessInfo, Result, SandboxConfig, SandboxId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SnapshotId(pub Uuid);
@@ -77,4 +77,12 @@ pub trait SnapshotStore: Send + Sync {
     async fn remove_active_sandbox(&self, sandbox_id: &SandboxId) -> Result<()>;
 
     async fn list_active_sandboxes(&self) -> Result<Vec<ActiveSandboxRecord>>;
+
+    async fn upsert_process(&self, process: &ProcessInfo) -> Result<()>;
+
+    async fn get_process(&self, process_id: &ProcessId) -> Result<Option<ProcessInfo>>;
+
+    async fn list_processes(&self) -> Result<Vec<ProcessInfo>>;
+
+    async fn remove_process(&self, process_id: &ProcessId) -> Result<()>;
 }

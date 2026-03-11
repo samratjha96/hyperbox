@@ -5,8 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
 use hyperbox_core::{
-    ActiveSandboxRecord, AffinityRecord, HyperboxError, Result, SandboxConfig, SandboxId,
-    SnapshotId, SnapshotMetadata, SnapshotStore,
+    ActiveSandboxRecord, AffinityRecord, HyperboxError, ProcessId, ProcessInfo, Result,
+    SandboxConfig, SandboxId, SnapshotId, SnapshotMetadata, SnapshotStore,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -14,6 +14,7 @@ pub struct InMemorySnapshotStore {
     snapshots: Arc<Mutex<HashMap<SnapshotId, SnapshotMetadata>>>,
     affinities: Arc<Mutex<HashMap<String, AffinityRecord>>>,
     active: Arc<Mutex<HashMap<SandboxId, ActiveSandboxRecord>>>,
+    processes: Arc<Mutex<HashMap<ProcessId, ProcessInfo>>>,
 }
 
 #[async_trait::async_trait]
@@ -131,6 +132,27 @@ impl SnapshotStore for InMemorySnapshotStore {
     async fn list_active_sandboxes(&self) -> Result<Vec<ActiveSandboxRecord>> {
         Ok(self.active.lock().await.values().cloned().collect())
     }
+
+    async fn upsert_process(&self, process: &ProcessInfo) -> Result<()> {
+        self.processes
+            .lock()
+            .await
+            .insert(process.id.clone(), process.clone());
+        Ok(())
+    }
+
+    async fn get_process(&self, process_id: &ProcessId) -> Result<Option<ProcessInfo>> {
+        Ok(self.processes.lock().await.get(process_id).cloned())
+    }
+
+    async fn list_processes(&self) -> Result<Vec<ProcessInfo>> {
+        Ok(self.processes.lock().await.values().cloned().collect())
+    }
+
+    async fn remove_process(&self, process_id: &ProcessId) -> Result<()> {
+        self.processes.lock().await.remove(process_id);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +214,27 @@ impl SqliteSnapshotStore {
               config_json TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS processes (
+              process_id TEXT PRIMARY KEY,
+              sandbox_id TEXT NOT NULL,
+              requested_sandbox_id TEXT,
+              disposition TEXT NOT NULL,
+              command_json TEXT NOT NULL,
+              status TEXT NOT NULL,
+              stdout_path TEXT NOT NULL,
+              stderr_path TEXT NOT NULL,
+              backend_pid INTEGER,
+              exit_code INTEGER,
+              started_at TEXT NOT NULL,
+              finished_at TEXT,
+              expires_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS processes_sandbox_idx
+              ON processes(sandbox_id);
+            CREATE INDEX IF NOT EXISTS processes_status_idx
+              ON processes(status);
             ",
         )
         .map_err(sql_err)?;
@@ -444,6 +487,136 @@ impl SnapshotStore for SqliteSnapshotStore {
                 .map_err(sql_err)
         })
     }
+
+    async fn upsert_process(&self, process: &ProcessInfo) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO processes (
+                   process_id, sandbox_id, requested_sandbox_id, disposition, command_json,
+                   status, stdout_path, stderr_path, backend_pid, exit_code, started_at,
+                   finished_at, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(process_id) DO UPDATE SET
+                   sandbox_id = excluded.sandbox_id,
+                   requested_sandbox_id = excluded.requested_sandbox_id,
+                   disposition = excluded.disposition,
+                   command_json = excluded.command_json,
+                   status = excluded.status,
+                   stdout_path = excluded.stdout_path,
+                   stderr_path = excluded.stderr_path,
+                   backend_pid = excluded.backend_pid,
+                   exit_code = excluded.exit_code,
+                   started_at = excluded.started_at,
+                   finished_at = excluded.finished_at,
+                   expires_at = excluded.expires_at",
+                params![
+                    process.id.0.to_string(),
+                    process.sandbox_id.0.to_string(),
+                    process.requested_sandbox_id.as_ref().map(|id| id.0.to_string()),
+                    serde_json::to_string(&process.disposition)?,
+                    serde_json::to_string(&process.command)?,
+                    serde_json::to_string(&process.status)?,
+                    process.stdout_path,
+                    process.stderr_path,
+                    process.backend_pid,
+                    process.exit_code,
+                    process.started_at.to_rfc3339(),
+                    process.finished_at.map(|time| time.to_rfc3339()),
+                    process.expires_at.map(|time| time.to_rfc3339()),
+                ],
+            )
+            .map_err(sql_err)?;
+            Ok(())
+        })
+    }
+
+    async fn get_process(&self, process_id: &ProcessId) -> Result<Option<ProcessInfo>> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT process_id, sandbox_id, requested_sandbox_id, disposition, command_json,
+                        status, stdout_path, stderr_path, backend_pid, exit_code, started_at,
+                        finished_at, expires_at
+                 FROM processes
+                 WHERE process_id = ?1",
+                params![process_id.0.to_string()],
+                |row| process_from_row(row),
+            )
+            .optional()
+            .map_err(sql_err)
+        })
+    }
+
+    async fn list_processes(&self) -> Result<Vec<ProcessInfo>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT process_id, sandbox_id, requested_sandbox_id, disposition, command_json,
+                            status, stdout_path, stderr_path, backend_pid, exit_code, started_at,
+                            finished_at, expires_at
+                     FROM processes
+                     ORDER BY started_at DESC",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt.query_map([], process_from_row).map_err(sql_err)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(sql_err)
+        })
+    }
+
+    async fn remove_process(&self, process_id: &ProcessId) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM processes WHERE process_id = ?1",
+                params![process_id.0.to_string()],
+            )
+            .map_err(sql_err)?;
+            Ok(())
+        })
+    }
+}
+
+fn process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessInfo> {
+    let process_id: String = row.get(0)?;
+    let sandbox_id: String = row.get(1)?;
+    let requested_sandbox_id: Option<String> = row.get(2)?;
+    let disposition_json: String = row.get(3)?;
+    let command_json: String = row.get(4)?;
+    let status_json: String = row.get(5)?;
+    let stdout_path: String = row.get(6)?;
+    let stderr_path: String = row.get(7)?;
+    let backend_pid: Option<u32> = row.get(8)?;
+    let exit_code: Option<i32> = row.get(9)?;
+    let started_at: String = row.get(10)?;
+    let finished_at: Option<String> = row.get(11)?;
+    let expires_at: Option<String> = row.get(12)?;
+
+    Ok(ProcessInfo {
+        id: ProcessId(parse_uuid(&process_id)?),
+        sandbox_id: SandboxId(parse_uuid(&sandbox_id)?),
+        requested_sandbox_id: requested_sandbox_id
+            .as_deref()
+            .map(parse_uuid)
+            .transpose()?
+            .map(SandboxId),
+        disposition: serde_json::from_str(&disposition_json).map_err(to_sql_error)?,
+        command: serde_json::from_str(&command_json).map_err(to_sql_error)?,
+        status: serde_json::from_str(&status_json).map_err(to_sql_error)?,
+        stdout_path,
+        stderr_path,
+        backend_pid,
+        exit_code,
+        started_at: parse_rfc3339_utc(&started_at).map_err(to_sql_error)?,
+        finished_at: finished_at
+            .as_deref()
+            .map(parse_rfc3339_utc)
+            .transpose()
+            .map_err(to_sql_error)?,
+        expires_at: expires_at
+            .as_deref()
+            .map(parse_rfc3339_utc)
+            .transpose()
+            .map_err(to_sql_error)?,
+    })
 }
 
 fn parse_uuid(raw: &str) -> rusqlite::Result<uuid::Uuid> {
@@ -468,6 +641,7 @@ fn sql_err(err: rusqlite::Error) -> HyperboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperbox_core::{ProcessDisposition, ProcessId, ProcessInfo, ProcessStatus};
 
     #[tokio::test]
     async fn snapshot_store_roundtrip() {
@@ -556,6 +730,58 @@ mod tests {
                 .list_active_sandboxes()
                 .await
                 .expect("list active sandboxes after delete")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_persists_process_records() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let db_path = root.path().join("state.db");
+        let store = SqliteSnapshotStore::open(db_path).expect("open sqlite store");
+
+        let record = ProcessInfo {
+            id: ProcessId::new(),
+            sandbox_id: SandboxId::new(),
+            requested_sandbox_id: None,
+            disposition: ProcessDisposition::CreatedNew,
+            command: vec!["/bin/sh".to_string(), "-lc".to_string(), "echo ok".to_string()],
+            status: ProcessStatus::Running,
+            stdout_path: ".hyperbox/processes/stdout.log".to_string(),
+            stderr_path: ".hyperbox/processes/stderr.log".to_string(),
+            backend_pid: Some(42),
+            exit_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+            expires_at: None,
+        };
+
+        store
+            .upsert_process(&record)
+            .await
+            .expect("upsert process");
+
+        let found = store
+            .get_process(&record.id)
+            .await
+            .expect("get process")
+            .expect("process exists");
+        assert_eq!(found.sandbox_id, record.sandbox_id);
+        assert_eq!(found.status, ProcessStatus::Running);
+
+        let listed = store.list_processes().await.expect("list processes");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, record.id);
+
+        store
+            .remove_process(&record.id)
+            .await
+            .expect("remove process");
+        assert!(
+            store
+                .list_processes()
+                .await
+                .expect("list processes after delete")
                 .is_empty()
         );
     }
