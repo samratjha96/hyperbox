@@ -186,6 +186,9 @@ enum HelperRequest {
         path: String,
         bytes_b64: String,
     },
+    Inspect {
+        sandbox_id: String,
+    },
     Destroy {
         sandbox_id: String,
     },
@@ -195,6 +198,7 @@ enum HelperRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum HelperResponse {
     Ack,
+    Inspect,
     Exec {
         exit_code: i32,
         stdout: String,
@@ -296,6 +300,7 @@ impl AppleHelper {
                 path,
                 bytes_b64,
             } => self.write_file(sandbox_id, path, bytes_b64).await,
+            HelperRequest::Inspect { sandbox_id } => self.inspect_sandbox(sandbox_id).await,
             HelperRequest::Destroy { sandbox_id } => self.destroy_sandbox(sandbox_id).await,
         };
 
@@ -770,6 +775,33 @@ impl AppleHelper {
             "apple helper sandbox destroyed"
         );
         Ok(HelperResponse::Ack)
+    }
+
+    async fn inspect_sandbox(&mut self, sandbox_id: String) -> anyhow::Result<HelperResponse> {
+        let Some(session) = self.sandboxes.get(&sandbox_id) else {
+            bail!("sandbox `{sandbox_id}` not found");
+        };
+
+        let result = self
+            .run_container_command(
+                vec!["inspect".to_string(), session.container_name.clone()],
+                None,
+                DEFAULT_IO_TIMEOUT_SECS,
+            )
+            .await?;
+        if result.exit_code != 0 {
+            if error_output_is_not_found(&result.stderr) {
+                self.sandboxes.remove(&sandbox_id);
+                bail!("sandbox `{sandbox_id}` not found");
+            }
+            bail!(
+                "inspect sandbox `{sandbox_id}` failed (exit={}): {}",
+                result.exit_code,
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        Ok(HelperResponse::Inspect)
     }
 
     async fn inspect_network_gateway(&self, network_name: &str) -> anyhow::Result<String> {

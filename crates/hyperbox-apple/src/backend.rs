@@ -92,6 +92,9 @@ enum HelperRequest {
         path: String,
         bytes_b64: String,
     },
+    Inspect {
+        sandbox_id: String,
+    },
     Destroy {
         sandbox_id: String,
     },
@@ -101,6 +104,7 @@ enum HelperRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum HelperResponse {
     Ack,
+    Inspect,
     Exec {
         exit_code: i32,
         stdout: String,
@@ -624,6 +628,32 @@ impl AppleVzBackend {
             state: SandboxState::Ready,
             created_at,
         })
+    }
+
+    async fn inspect_helper_sandbox(
+        &self,
+        sandbox_id: &SandboxId,
+        info: SandboxInfo,
+    ) -> Result<SandboxInfo> {
+        match self
+            .helper_request(&HelperRequest::Inspect {
+                sandbox_id: sandbox_id.0.to_string(),
+            })
+            .await?
+        {
+            HelperResponse::Inspect => Ok(info),
+            HelperResponse::Error { message } => {
+                if message.to_ascii_lowercase().contains("not found") {
+                    return Err(HyperboxError::SandboxNotFound(sandbox_id.0.to_string()));
+                }
+                Err(HyperboxError::ExecutionFailed(format!(
+                    "apple helper inspect failed: {message}"
+                )))
+            }
+            other => Err(HyperboxError::ExecutionFailed(format!(
+                "unexpected apple helper response on inspect: {other:?}"
+            ))),
+        }
     }
 }
 
@@ -1245,6 +1275,10 @@ impl SandboxBackend for AppleVzBackend {
                 return self.inspect_container_fallback(sandbox_id).await;
             }
 
+            if self.config.launch_command.is_some() {
+                return self.inspect_helper_sandbox(sandbox_id, info).await;
+            }
+
             return Ok(info);
         }
 
@@ -1639,6 +1673,71 @@ mod tests {
             .inspect(&sandbox_id)
             .await
             .expect_err("inspect should reject stale direct container entries");
+        assert!(matches!(err, HyperboxError::SandboxNotFound(_)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn inspect_checks_helper_managed_state_for_existing_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "hyperbox-apple-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let mock_helper = root.join("mock-helper");
+        fs::write(
+            &mock_helper,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"inspect"'*)
+      printf '%s\n' '{"op":"error","message":"sandbox not found"}'
+      ;;
+    *)
+      printf '%s\n' '{"op":"ack"}'
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write mock helper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&mock_helper)
+                .expect("stat mock helper")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&mock_helper, perms).expect("chmod mock helper");
+        }
+
+        let backend = AppleVzBackend::new(AppleBackendConfig {
+            launch_command: Some(vec![mock_helper.to_string_lossy().to_string()]),
+            runtime_kind: AppleRuntimeKind::Containerization,
+            ..AppleBackendConfig::default()
+        });
+        let sandbox_id = SandboxId::new();
+        backend.sandboxes.lock().await.insert(
+            sandbox_id.clone(),
+            AppleSandbox {
+                info: SandboxInfo {
+                    id: sandbox_id.clone(),
+                    template: "python:3.12".to_string(),
+                    state: SandboxState::Ready,
+                    created_at: Utc::now(),
+                },
+                config: SandboxConfig::default(),
+                direct_container: None,
+            },
+        );
+
+        let err = backend
+            .inspect(&sandbox_id)
+            .await
+            .expect_err("inspect should reject stale helper-managed entries");
         assert!(matches!(err, HyperboxError::SandboxNotFound(_)));
         let _ = fs::remove_dir_all(&root);
     }
