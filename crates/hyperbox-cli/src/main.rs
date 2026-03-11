@@ -1724,7 +1724,14 @@ async fn run_remote_with_client(
             artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
         }
 
-        emit_result(outcome, artifacts, json, effective_isolation, explain)
+        emit_result(
+            outcome,
+            artifacts,
+            json,
+            !json,
+            effective_isolation,
+            explain,
+        )
     }
     .await;
 
@@ -1794,7 +1801,14 @@ async fn run_existing_with_client(
         artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
     }
 
-    let exit_code = emit_result(outcome, artifacts, json, effective_isolation, explain)?;
+    let exit_code = emit_result(
+        outcome,
+        artifacts,
+        json,
+        !json,
+        effective_isolation,
+        explain,
+    )?;
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -2616,6 +2630,7 @@ fn emit_result(
     outcome: hyperbox_core::ExecOutcome,
     artifacts: Vec<(String, String)>,
     json: bool,
+    logs_already_emitted: bool,
     effective_isolation: Option<&EffectiveIsolationSummary>,
     explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<i32> {
@@ -2633,8 +2648,10 @@ fn emit_result(
         };
         println!("{}", serde_json::to_string(&response)?);
     } else {
-        print!("{}", outcome.stdout);
-        eprint!("{}", outcome.stderr);
+        if !logs_already_emitted {
+            print!("{}", outcome.stdout);
+            eprint!("{}", outcome.stderr);
+        }
         for (path, data) in &artifacts {
             println!("--- {path} ---");
             print!("{data}");

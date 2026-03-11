@@ -140,6 +140,31 @@ fn run_reuses_session_by_default() {
 }
 
 #[test]
+fn run_prints_stdout_once() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let out = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "run",
+            "--ephemeral",
+            "--template",
+            "python:3.12",
+            "--cmd",
+            "printf once",
+        ])
+        .output()
+        .expect("run command");
+
+    let _ = server.kill();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "once");
+}
+
+#[test]
 fn run_ensure_executes_once_per_reused_session() {
     let Some((mut server, url)) = spawn_server() else {
         return;
