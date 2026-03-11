@@ -1,7 +1,15 @@
 # Managed Process Execution Plan
 
 Date: 2026-03-11
-Status: Proposed
+Status: In Progress
+
+Implemented so far:
+
+- durable managed process state and persistence
+- managed process runtime lifecycle (`start`, `logs`, `wait`, `cancel`)
+- gRPC process APIs
+- CLI process commands (`run --detach`, `ps`, `logs`, `wait`, `cancel`)
+- busy-sandbox overflow handling in the CLI `run` path
 
 ## Goal
 

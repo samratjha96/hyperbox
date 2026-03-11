@@ -2,13 +2,13 @@
 
 Secure sandbox runtime for AI agent code execution.
 
-hyperbox gives you a consistent control plane for running untrusted code in isolated sandboxes with explicit network policy, persistent sessions, and reproducible lifecycle operations.
+hyperbox gives you a consistent control plane for running untrusted code in isolated sandboxes with explicit network policy, persistent sessions, and durable managed processes.
 
 ## TL;DR
 
-**Problem:** Agent workflows need to run arbitrary shell/Python/build commands safely without destroying host environments or leaking credentials.
+**Problem:** Agent workflows need to run arbitrary shell/Python/build commands safely without destroying host environments or leaking credentials, and they also need to delegate work that may outlive a single terminal session.
 
-**Solution:** Run commands through `hyperbox`, which provides isolated execution, network policy enforcement (`none`/`allowlist`/`full`), reusable sandbox sessions, and snapshot restore workflows.
+**Solution:** Run commands through `hyperbox`, which provides isolated execution, network policy enforcement (`none`/`allowlist`/`full`), reusable sandbox sessions, managed process lifecycle (`run`, `--detach`, `logs`, `wait`, `cancel`), and snapshot restore workflows.
 
 ### Why hyperbox?
 
@@ -16,27 +16,43 @@ hyperbox gives you a consistent control plane for running untrusted code in isol
 | --- | --- |
 | Secure-by-default execution | `network=none` default policy with explicit opt-in to broader network access |
 | Reusable stateful sessions | Install dependencies once, reuse environment across commands |
-| Agent + human friendly interfaces | CLI, gRPC control plane, stdio proxy mode, Python SDK |
+| Durable delegated work | Start a process, disconnect, and come back later for logs, status, and exit code |
+| Agent + human friendly interfaces | CLI and gRPC control plane with the same process model |
 | Isolation transparency | `--explain` shows backend selection and effective policy |
 | Snapshot workflows | Save and restore sandbox state for fast recovery and reproducibility |
 
 ## Quickstart (2 Minutes)
 
-### 1) Build and setup (macOS)
+### 1) Install and setup (macOS)
 
 ```bash
-cargo build -p hyperbox-cli
-./target/debug/hyperbox setup
+# Ensure `hyperbox` is installed and available on PATH.
+# If developing from source, build it first:
+# cargo build -p hyperbox-cli && export PATH="$PWD/target/debug:$PATH"
+
+hyperbox --help
+hyperbox setup
 ```
 
 ### 2) Run a command with default locked networking
 
 ```bash
-HB=./target/debug/hyperbox
+HB=hyperbox
 $HB run --cmd "python3 -c 'print(2 + 2)'"
 ```
 
-### 3) Allow exactly one domain, and verify inverse blocking
+### 3) Delegate a longer task and come back later
+
+```bash
+$HB run --profile full --cmd "python3 -m pip install pytest"
+$HB run --profile full --cmd "pytest -q"
+
+PROC=$($HB run --profile full --cmd "python3 -c 'import time; print(\"start\"); time.sleep(30); print(\"done\")'" --detach --json | jq -r '.process.process_id')
+$HB logs "$PROC"
+$HB wait "$PROC"
+```
+
+### 4) Allow exactly one domain, and verify inverse blocking
 
 Note: on some macOS hosts, `allowlist` may be unavailable. If Hyperbox reports that, use `network=none|full` for now and run `hyperbox setup` to check host prerequisites.
 
@@ -52,7 +68,7 @@ The second command should fail because `github.com` is not allowlisted.
 
 Tip: add `--explain` to see effective backend mode and enforcement details for your host.
 
-### 4) Keep state between runs (install once, reuse)
+### 5) Keep state between runs (install once, reuse)
 
 ```bash
 $HB run --profile full --cmd "python3 -m pip install pytest"
@@ -63,11 +79,18 @@ $HB run --profile full --cmd "pytest -q"
 
 ## Core Concepts
 
-### Session model
+### Sandbox model
 
 - `hyperbox run` without `--ephemeral` reuses a deterministic affinity session.
 - `hyperbox create` creates an explicit persistent sandbox.
 - `hyperbox destroy` tears down by sandbox id or affinity name.
+
+### Process model
+
+- `hyperbox run` starts a managed process inside a sandbox.
+- `hyperbox run --detach` returns immediately with a process id.
+- `hyperbox logs`, `hyperbox wait`, and `hyperbox cancel` operate on the same managed process.
+- One sandbox can have one managed foreground process at a time. If a targeted sandbox is already busy, Hyperbox creates a fresh sandbox for the new run and tells you that it did so.
 
 ### Network model
 
@@ -85,34 +108,34 @@ $HB run --profile full --cmd "pytest -q"
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│                         Clients                             │
-│   hyperbox CLI    Python SDK    Agent Adapter (Proxy)      │
-└───────────────┬─────────────────────────────────────────────┘
-                │ gRPC / stdio JSON-lines
-┌───────────────▼─────────────────────────────────────────────┐
-│                 hyperbox control plane                       │
-│          crates/hyperbox-server (runtime + snapshots)       │
-└───────────────┬─────────────────────────────┬───────────────┘
-                │                             │
-      ┌─────────▼─────────┐         ┌────────▼──────────┐
-      │ macOS backend      │         │ Linux backend      │
-      │ crates/hyperbox-   │         │ crates/hyperbox-   │
-      │ apple              │         │ firecracker        │
-      └─────────┬──────────┘         └────────┬───────────┘
-                │                               │
-      ┌─────────▼──────────┐          ┌────────▼──────────┐
-      │ Apple helper /      │          │ Firecracker VM +  │
-      │ container runtime   │          │ hyperbox-agentd   │
-      └─────────────────────┘          └───────────────────┘
+│                          Clients                           │
+│        hyperbox CLI | gRPC clients | Agent adapters       │
+└─────────────────────────────┬──────────────────────────────┘
+                              │ gRPC / stdio JSON-lines
+┌─────────────────────────────▼──────────────────────────────┐
+│                    hyperbox control plane                  │
+│       runtime, sandboxes, processes, snapshots, policy     │
+└─────────────────┬───────────────────────────┬──────────────┘
+                  │                           │
+        ┌─────────▼─────────┐       ┌────────▼──────────┐
+        │   macOS backend   │       │   Linux backend   │
+        │ host-isolated     │       │ VM-isolated       │
+        │ runtime path      │       │ runtime path      │
+        └─────────┬─────────┘       └────────┬──────────┘
+                  │                           │
+        ┌─────────▼─────────┐       ┌────────▼──────────┐
+        │ Host primitives   │       │ Guest VM + agent  │
+        │ (sandboxing/net)  │       │ execution service │
+        └───────────────────┘       └───────────────────┘
 ```
 
-Additional crate roles:
+Component responsibilities:
 
-- `crates/hyperbox-core`: shared types, backend traits, templates, snapshots
-- `crates/hyperbox-network`: network/firewall planning and evaluators
-- `crates/hyperbox-agent`: guest/sidecar agent daemon protocol and service
-- `crates/hyperbox-cli`: end-user CLI entrypoint
-- `hyperbox-py`: Python SDK wrappers (gRPC + compatibility wrapper)
+- Control plane: sandbox lifecycle, managed process lifecycle, policy resolution, snapshots, session reuse
+- Backends: OS-specific isolation and execution implementation
+- Network enforcement: evaluates and applies `none`/`allowlist`/`full` policy
+- Agent execution service: guest or sidecar command and file operations where required by the backend
+- User interfaces: CLI, gRPC clients, and adapter layers
 
 ## Platform Matrix
 
@@ -127,6 +150,10 @@ Additional crate roles:
 Top-level commands:
 
 - `run`: execute a command in sandbox
+- `ps`: list managed processes
+- `logs`: read managed process logs
+- `wait`: wait for a managed process to finish
+- `cancel`: cancel a managed process
 - `create`: create persistent sandbox
 - `destroy`: destroy by id/name
 - `list`: list active sandboxes
@@ -142,9 +169,11 @@ Common flows:
 
 ```bash
 # Create, reuse, destroy
-HB=./target/debug/hyperbox
+HB=hyperbox
 SBX=$($HB create --name myproj --workspace "$PWD" --profile locked)
 $HB run --name myproj --cmd "python3 -V"
+$HB run --name myproj --cmd "pytest -q" --detach
+$HB ps
 $HB list
 $HB destroy --name myproj
 
@@ -154,17 +183,19 @@ SNAP=$($HB snapshot create --sandbox-id "$SBX")
 $HB destroy --sandbox-id "$SBX"
 $HB snapshot restore --snapshot-id "$SNAP"
 
-# Proxy mode for agent adapters
-$HB proxy --workspace "$PWD"
+# Managed process lifecycle
+PROC=$($HB run --name myproj --cmd "pytest -q" --detach --json | jq -r '.process.process_id')
+$HB logs "$PROC"
+$HB wait "$PROC"
 ```
 
 For complete command flags:
 
 ```bash
-./target/debug/hyperbox --help
-./target/debug/hyperbox run --help
-./target/debug/hyperbox proxy --help
-./target/debug/hyperbox snapshot --help
+hyperbox --help
+hyperbox run --help
+hyperbox proxy --help
+hyperbox snapshot --help
 ```
 
 ## Profiles and Configuration
@@ -189,7 +220,7 @@ allow = ["github.com", "pypi.org", "files.pythonhosted.org"]
 ```
 
 ```bash
-HB=./target/debug/hyperbox
+HB=hyperbox
 $HB run --profile team_web --cmd "python3 -m pip install requests"
 ```
 
@@ -205,39 +236,21 @@ $HB run --profile team_web --cmd "python3 -m pip install requests"
 | `HYPERBOX_NETWORK_DRY_RUN` | Firewall dry-run behavior for Firecracker network enforcement |
 | `HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK` | Allow non-`none` network in local backend (dev-only) |
 
-## Python SDK
+## SDKs
 
-Install:
+The gRPC control plane is the stable integration surface.
 
-```bash
-pip install -e hyperbox-py
-```
+Current in-repo examples and tooling focus on:
 
-gRPC SDK usage:
+- CLI-driven human workflows
+- gRPC client integrations
+- adapter-style agent integrations
 
-```python
-from hyperbox import HyperboxClient, SandboxSession
-
-with HyperboxClient("127.0.0.1:50051") as client:
-    with SandboxSession(client, template="python:3.12", workspace=".") as box:
-        out = box.exec("python3 -c 'print(42)'")
-        print(out.stdout)
-```
+TypeScript SDK work is planned to expose the same managed-process model directly to external agent runtimes.
 
 ## Performance and Benchmarks
 
-Benchmark harnesses are in:
-
-- `scripts/benchmark_apples_to_apples.py`
-- `scripts/benchmark_python_sdk_vs_opensandbox.py`
-
-Recorded benchmark outputs:
-
-- `benchmarks/apples_to_apples.json`
-- `benchmarks/python_sdk_vs_opensandbox.json`
-- `benchmarks/snapshot_lifecycle_bench.json`
-
-Use these as reproducible baselines and rerun in your own environment for decision-grade numbers.
+Benchmark tooling and historical reports are included in the repository. Treat reported numbers as environment-specific baselines and rerun benchmarks in your own setup before making decisions.
 
 ## Troubleshooting
 
@@ -247,7 +260,7 @@ Restart the local control plane and retry:
 
 ```bash
 pkill -f hyperbox || true
-./target/debug/hyperbox list
+hyperbox list
 ```
 
 ### `failed to connect to hyperbox control plane`
@@ -255,8 +268,14 @@ pkill -f hyperbox || true
 Ensure server autostart is enabled (default) or start manually:
 
 ```bash
-./target/debug/hyperbox serve --addr 127.0.0.1:50051
+hyperbox serve --addr 127.0.0.1:50051
 ```
+
+### `sandbox ... already has a running managed process`
+
+If you target a busy sandbox directly through lower-level APIs, Hyperbox rejects the second managed process.
+
+The CLI `run` path handles this for you by creating a fresh sandbox and telling you that it did so.
 
 ### `invalid allowlist ...`
 
@@ -270,7 +289,7 @@ Use explicit hostnames only:
 Install tool in the persistent sandbox session first:
 
 ```bash
-HB=./target/debug/hyperbox
+HB=hyperbox
 $HB run --profile full --cmd "python3 -m pip install pytest"
 $HB run --profile full --cmd "pytest -q"
 ```
@@ -292,10 +311,7 @@ cargo build --workspace
 
 ## Further Reading
 
-- `docs/QUICKSTART.md`
-- `docs/ARCHITECTURE.md`
-- `docs/APPLE_HELPER_PROTOCOL.md`
-- `docs/AGENT_INTEGRATION_DECISION.md`
+- `docs/` for extended quickstarts, architecture notes, protocol details, and integration guidance
 
 ## License
 

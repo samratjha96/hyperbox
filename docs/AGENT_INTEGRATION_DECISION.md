@@ -1,7 +1,7 @@
 # Agent Integration Decision
 
 Date: 2026-03-05
-Status: Proposed (ready to implement)
+Status: In Progress
 
 ## Problem
 
@@ -13,11 +13,12 @@ Key tension:
 
 ## Decision
 
-Use a **proxy-first architecture** as the default:
+Use a **control-plane-first architecture** as the default:
 
 1. Agent runs outside hyperbox.
 2. Agent tool calls are routed to a persistent hyperbox sandbox session.
-3. Sandbox uses workspace-aware execution (`workspace_dir`) so commands run against the repo context.
+3. Commands become managed processes inside that sandbox.
+4. Sandbox uses workspace-aware execution (`workspace_dir`) so commands run against the repo context.
 
 Also support **agent-in-sandbox compatibility mode** for tools we cannot instrument.
 
@@ -37,7 +38,7 @@ If the full coding agent runs inside sandbox, model/API credentials and orchestr
 
 ### 3) Preserves "normal command" ergonomics
 
-With persistent sessions and workspace mapping, commands still behave like normal shell usage (`pwd`, `ls`, `grep`, `git`, etc.), without per-command sandbox creation overhead.
+With persistent sessions, workspace mapping, and managed processes, commands still behave like normal shell usage (`pwd`, `ls`, `grep`, `git`, etc.), without per-command sandbox creation overhead.
 
 ## Modes
 
@@ -78,16 +79,18 @@ Default recommendation:
 Hyperbox integration interface should expose:
 
 - `create_session(template, workspace_mode, workspace_path, network_policy, ttl)`
-- `exec(session_id, command, timeout, stream=true)`
+- `run(session_id, command)` for synchronous workflows
+- `start_process(session_id, command)` for detached workflows
+- `logs(process_id)` / `wait(process_id)` / `cancel(process_id)`
 - `read_file` / `write_file` / `apply_patch`
-- `list_files` / `grep`
 - `snapshot` / `restore`
 - `destroy_session`
 
 Behavior:
-- Persistent shell/session state.
-- Streaming stdout/stderr.
+- Persistent sandbox state.
+- Durable process ids for delegated work.
 - Deterministic exit codes.
+- Reconnectable logs and status.
 - Structured audit log of commands + approvals + policy denials.
 
 ## Security model
@@ -104,21 +107,19 @@ Behavior:
 
 ## Implementation plan (incremental)
 
-1. Add `hyperbox proxy` process that:
-   - creates/reuses sandbox sessions,
-   - exposes a local JSON-RPC/stdio contract for agent tool adapters,
-   - forwards `exec/file` operations to hyperbox.
-2. Add adapters:
+1. Add adapters:
    - MCP server adapter (for MCP-capable agents),
    - CLI wrapper adapter (for non-MCP agents).
+2. Keep `hyperbox proxy` only as an adapter helper, not as the primary execution model.
 3. Add workspace modes (`shared`, `overlay`, `mirror`) on top of existing `workspace_dir`.
 4. Add policy profiles + audit events.
-5. Add `hyperbox run-agent` for Mode B compatibility.
+5. Add `hyperbox run-agent` for Mode B compatibility if needed.
 
 ## Success criteria
 
 - Agent can complete multi-step coding tasks without noticing sandbox plumbing.
 - No per-command sandbox recreation in normal runs.
+- Long-running commands can be delegated and reattached later.
 - Repositories are accessible end-to-end (`git`, build tools, tests).
 - Policy denials are clear and recoverable.
 - Security posture remains strict by default.
