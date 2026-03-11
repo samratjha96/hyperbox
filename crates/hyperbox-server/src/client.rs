@@ -1,5 +1,7 @@
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, NetworkMode, SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata,
+    ExecOutcome, ExecRequest, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo,
+    ProcessLogRead, ProcessStatus, SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata,
+    StreamName,
 };
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_client::HyperboxControlClient};
 
@@ -25,6 +27,55 @@ pub struct ServerInfo {
 pub struct ActiveSandboxInfo {
     pub info: SandboxInfo,
     pub affinity_name: Option<String>,
+}
+
+fn parse_process_info(info: pb::ProcessInfo) -> anyhow::Result<ProcessInfo> {
+    Ok(ProcessInfo {
+        id: ProcessId(uuid::Uuid::parse_str(&info.process_id)?),
+        sandbox_id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.sandbox_id)?),
+        requested_sandbox_id: if info.requested_sandbox_id.is_empty() {
+            None
+        } else {
+            Some(hyperbox_core::SandboxId(uuid::Uuid::parse_str(
+                &info.requested_sandbox_id,
+            )?))
+        },
+        disposition: match info.disposition.as_str() {
+            "CreatedNew" => ProcessDisposition::CreatedNew,
+            "CreatedDueToBusy" => ProcessDisposition::CreatedDueToBusy,
+            _ => ProcessDisposition::ReusedExisting,
+        },
+        command: info.command,
+        status: match info.status.as_str() {
+            "Starting" => ProcessStatus::Starting,
+            "Running" => ProcessStatus::Running,
+            "Succeeded" => ProcessStatus::Succeeded,
+            "Cancelled" => ProcessStatus::Cancelled,
+            "Lost" => ProcessStatus::Lost,
+            _ => ProcessStatus::Failed,
+        },
+        stdout_path: info.stdout_path,
+        stderr_path: info.stderr_path,
+        backend_pid: info.has_backend_pid.then_some(info.backend_pid),
+        exit_code: info.has_exit_code.then_some(info.exit_code),
+        started_at: chrono::DateTime::parse_from_rfc3339(&info.started_at)?
+            .with_timezone(&chrono::Utc),
+        finished_at: if info.finished_at.is_empty() {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(&info.finished_at)?
+                    .with_timezone(&chrono::Utc),
+            )
+        },
+        expires_at: if info.expires_at.is_empty() {
+            None
+        } else {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(&info.expires_at)?.with_timezone(&chrono::Utc),
+            )
+        },
+    })
 }
 
 impl GrpcControlClient {
@@ -131,6 +182,127 @@ impl GrpcControlClient {
             stderr: response.stderr,
             duration_ms: response.duration_ms as u128,
         })
+    }
+
+    pub async fn start_process(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+        command: Vec<String>,
+        requested_sandbox_id: Option<hyperbox_core::SandboxId>,
+        disposition: ProcessDisposition,
+    ) -> anyhow::Result<ProcessInfo> {
+        let response = self
+            .inner
+            .start_process(pb::StartProcessRequest {
+                sandbox_id: sandbox_id.0.to_string(),
+                command,
+                requested_sandbox_id: requested_sandbox_id
+                    .map(|id| id.0.to_string())
+                    .unwrap_or_default(),
+                disposition: format!("{:?}", disposition),
+            })
+            .await?
+            .into_inner();
+        parse_process_info(
+            response
+                .process
+                .ok_or_else(|| anyhow::anyhow!("missing process info"))?,
+        )
+    }
+
+    pub async fn get_process(&mut self, process_id: &ProcessId) -> anyhow::Result<ProcessInfo> {
+        let response = self
+            .inner
+            .get_process(pb::GetProcessRequest {
+                process_id: process_id.0.to_string(),
+            })
+            .await?
+            .into_inner();
+        parse_process_info(
+            response
+                .process
+                .ok_or_else(|| anyhow::anyhow!("missing process info"))?,
+        )
+    }
+
+    pub async fn list_processes(&mut self) -> anyhow::Result<Vec<ProcessInfo>> {
+        let response = self
+            .inner
+            .list_processes(pb::ListProcessesRequest {})
+            .await?
+            .into_inner();
+        response
+            .processes
+            .into_iter()
+            .map(parse_process_info)
+            .collect()
+    }
+
+    pub async fn read_process_log(
+        &mut self,
+        process_id: &ProcessId,
+        stream: StreamName,
+        offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<ProcessLogRead> {
+        let response = self
+            .inner
+            .read_process_log(pb::ReadProcessLogRequest {
+                process_id: process_id.0.to_string(),
+                stream: match stream {
+                    StreamName::Stdout => "stdout".to_string(),
+                    StreamName::Stderr => "stderr".to_string(),
+                },
+                offset,
+                limit,
+            })
+            .await?
+            .into_inner();
+        Ok(ProcessLogRead {
+            stream: match response.stream.as_str() {
+                "stderr" => StreamName::Stderr,
+                _ => StreamName::Stdout,
+            },
+            offset: response.offset,
+            next_offset: response.next_offset,
+            eof: response.eof,
+            contents: response.contents,
+        })
+    }
+
+    pub async fn wait_process(
+        &mut self,
+        process_id: &ProcessId,
+        timeout_secs: u64,
+    ) -> anyhow::Result<ProcessInfo> {
+        let response = self
+            .inner
+            .wait_process(pb::WaitProcessRequest {
+                process_id: process_id.0.to_string(),
+                timeout_secs,
+            })
+            .await?
+            .into_inner();
+        parse_process_info(
+            response
+                .process
+                .ok_or_else(|| anyhow::anyhow!("missing process info"))?,
+        )
+    }
+
+    pub async fn cancel_process(&mut self, process_id: &ProcessId) -> anyhow::Result<ProcessInfo> {
+        let response = self
+            .inner
+            .cancel_process(pb::CancelProcessRequest {
+                process_id: process_id.0.to_string(),
+            })
+            .await?
+            .into_inner();
+        parse_process_info(
+            response
+                .process
+                .ok_or_else(|| anyhow::anyhow!("missing process info"))?,
+        )
     }
 
     pub async fn destroy_sandbox(

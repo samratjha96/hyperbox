@@ -208,3 +208,49 @@ fn list_shows_created_sandbox() {
     let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(stdout.contains(&sandbox_id));
 }
+
+#[test]
+fn detached_run_can_be_waited_and_logged() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let started = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "run",
+            "--template",
+            "python:3.12",
+            "--cmd",
+            "printf detached-cli",
+            "--detach",
+            "--json",
+        ])
+        .output()
+        .expect("start detached process");
+    assert!(started.status.success());
+    let started_stdout = String::from_utf8_lossy(&started.stdout);
+    let process_id = started_stdout
+        .split("\"process_id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("extract process id")
+        .to_string();
+
+    let waited = Command::new(hyperbox_bin())
+        .args(["--server-url", &url, "wait", &process_id, "--json"])
+        .output()
+        .expect("wait process");
+    assert!(waited.status.success());
+    assert!(String::from_utf8_lossy(&waited.stdout).contains("succeeded"));
+
+    let logs = Command::new(hyperbox_bin())
+        .args(["--server-url", &url, "logs", &process_id])
+        .output()
+        .expect("read process logs");
+
+    let _ = server.kill();
+    assert!(logs.status.success());
+    assert!(String::from_utf8_lossy(&logs.stdout).contains("detached-cli"));
+}

@@ -1,7 +1,10 @@
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
-use hyperbox_core::{ExecRequest, FilePayload, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
+use hyperbox_core::{
+    ExecRequest, FilePayload, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo,
+    ProcessLogRead, SandboxConfig, SandboxId, SnapshotId, StreamName,
+};
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_server::HyperboxControl};
 
 use crate::HyperboxServer;
@@ -40,12 +43,66 @@ fn parse_sandbox_id(raw: &str) -> Result<SandboxId, Status> {
     Ok(SandboxId(id))
 }
 
+fn parse_process_id(raw: &str) -> Result<ProcessId, Status> {
+    let id = uuid::Uuid::parse_str(raw)
+        .map_err(|e| Status::invalid_argument(format!("invalid process_id: {e}")))?;
+    Ok(ProcessId(id))
+}
+
 fn into_proto_info(info: hyperbox_core::SandboxInfo) -> pb::SandboxInfo {
     pb::SandboxInfo {
         id: info.id.0.to_string(),
         template: info.template,
         state: format!("{:?}", info.state),
         created_at: info.created_at.to_rfc3339(),
+    }
+}
+
+fn into_proto_process(process: ProcessInfo) -> pb::ProcessInfo {
+    pb::ProcessInfo {
+        process_id: process.id.0.to_string(),
+        sandbox_id: process.sandbox_id.0.to_string(),
+        requested_sandbox_id: process
+            .requested_sandbox_id
+            .map(|id| id.0.to_string())
+            .unwrap_or_default(),
+        disposition: format!("{:?}", process.disposition),
+        command: process.command,
+        status: format!("{:?}", process.status),
+        stdout_path: process.stdout_path,
+        stderr_path: process.stderr_path,
+        backend_pid: process.backend_pid.unwrap_or_default(),
+        has_backend_pid: process.backend_pid.is_some(),
+        exit_code: process.exit_code.unwrap_or_default(),
+        has_exit_code: process.exit_code.is_some(),
+        started_at: process.started_at.to_rfc3339(),
+        finished_at: process
+            .finished_at
+            .map(|time| time.to_rfc3339())
+            .unwrap_or_default(),
+        expires_at: process
+            .expires_at
+            .map(|time| time.to_rfc3339())
+            .unwrap_or_default(),
+    }
+}
+
+fn parse_process_disposition(raw: &str) -> Result<ProcessDisposition, Status> {
+    match raw {
+        "" | "ReusedExisting" => Ok(ProcessDisposition::ReusedExisting),
+        "CreatedNew" => Ok(ProcessDisposition::CreatedNew),
+        "CreatedDueToBusy" => Ok(ProcessDisposition::CreatedDueToBusy),
+        other => Err(Status::invalid_argument(format!(
+            "invalid process disposition: {other}"
+        ))),
+    }
+}
+
+fn parse_stream_name(raw: &str) -> Result<StreamName, Status> {
+    match raw {
+        "stdout" | "Stdout" => Ok(StreamName::Stdout),
+        "stderr" | "Stderr" => Ok(StreamName::Stderr),
+        other => Err(Status::invalid_argument(format!("invalid stream: {other}"))),
     }
 }
 
@@ -108,6 +165,123 @@ impl From<crate::MetricsSnapshot> for pb::MetricsResponse {
 
 #[tonic::async_trait]
 impl HyperboxControl for GrpcControlService {
+    async fn start_process(
+        &self,
+        request: Request<pb::StartProcessRequest>,
+    ) -> Result<Response<pb::StartProcessResponse>, Status> {
+        let peer = request.remote_addr();
+        let request = request.into_inner();
+        let sandbox_id = parse_sandbox_id(&request.sandbox_id)?;
+        let requested_sandbox_id = if request.requested_sandbox_id.is_empty() {
+            None
+        } else {
+            Some(parse_sandbox_id(&request.requested_sandbox_id)?)
+        };
+        let disposition = parse_process_disposition(&request.disposition)?;
+        let process = self
+            .runtime
+            .start_process(
+                &sandbox_id,
+                request.command,
+                requested_sandbox_id,
+                disposition,
+            )
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, sandbox_id = %sandbox_id.0, error = %e, "grpc start_process failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(pb::StartProcessResponse {
+            process: Some(into_proto_process(process)),
+        }))
+    }
+
+    async fn get_process(
+        &self,
+        request: Request<pb::GetProcessRequest>,
+    ) -> Result<Response<pb::GetProcessResponse>, Status> {
+        let peer = request.remote_addr();
+        let process_id = parse_process_id(&request.into_inner().process_id)?;
+        let process = self.runtime.get_process(&process_id).await.map_err(|e| {
+            error!(peer = ?peer, process_id = %process_id.0, error = %e, "grpc get_process failed");
+            Status::internal(e.to_string())
+        })?;
+        Ok(Response::new(pb::GetProcessResponse {
+            process: Some(into_proto_process(process)),
+        }))
+    }
+
+    async fn list_processes(
+        &self,
+        _request: Request<pb::ListProcessesRequest>,
+    ) -> Result<Response<pb::ListProcessesResponse>, Status> {
+        let processes = self.runtime.list_processes().await.map_err(|e| {
+            error!(error = %e, "grpc list_processes failed");
+            Status::internal(e.to_string())
+        })?;
+        Ok(Response::new(pb::ListProcessesResponse {
+            processes: processes.into_iter().map(into_proto_process).collect(),
+        }))
+    }
+
+    async fn read_process_log(
+        &self,
+        request: Request<pb::ReadProcessLogRequest>,
+    ) -> Result<Response<pb::ReadProcessLogResponse>, Status> {
+        let peer = request.remote_addr();
+        let request = request.into_inner();
+        let process_id = parse_process_id(&request.process_id)?;
+        let stream = parse_stream_name(&request.stream)?;
+        let log = self
+            .runtime
+            .read_process_log(&process_id, stream, request.offset, request.limit)
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, process_id = %process_id.0, error = %e, "grpc read_process_log failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(into_proto_process_log(log)))
+    }
+
+    async fn wait_process(
+        &self,
+        request: Request<pb::WaitProcessRequest>,
+    ) -> Result<Response<pb::WaitProcessResponse>, Status> {
+        let peer = request.remote_addr();
+        let request = request.into_inner();
+        let process_id = parse_process_id(&request.process_id)?;
+        let process = self
+            .runtime
+            .wait_process(&process_id, request.timeout_secs.max(1))
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, process_id = %process_id.0, error = %e, "grpc wait_process failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(pb::WaitProcessResponse {
+            process: Some(into_proto_process(process)),
+        }))
+    }
+
+    async fn cancel_process(
+        &self,
+        request: Request<pb::CancelProcessRequest>,
+    ) -> Result<Response<pb::CancelProcessResponse>, Status> {
+        let peer = request.remote_addr();
+        let process_id = parse_process_id(&request.into_inner().process_id)?;
+        let process = self
+            .runtime
+            .cancel_process(&process_id)
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, process_id = %process_id.0, error = %e, "grpc cancel_process failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(pb::CancelProcessResponse {
+            process: Some(into_proto_process(process)),
+        }))
+    }
+
     async fn create_sandbox(
         &self,
         request: Request<pb::CreateSandboxRequest>,
@@ -445,6 +619,19 @@ impl HyperboxControl for GrpcControlService {
             info: Some(into_proto_info(info)),
             restored,
         }))
+    }
+}
+
+fn into_proto_process_log(log: ProcessLogRead) -> pb::ReadProcessLogResponse {
+    pb::ReadProcessLogResponse {
+        stream: match log.stream {
+            StreamName::Stdout => "stdout".to_string(),
+            StreamName::Stderr => "stderr".to_string(),
+        },
+        offset: log.offset,
+        next_offset: log.next_offset,
+        eof: log.eof,
+        contents: log.contents,
     }
 }
 

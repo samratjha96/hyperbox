@@ -165,6 +165,81 @@ message ResolveAffinityResponse {
   bool restored = 2;
 }
 
+message ProcessInfo {
+  string process_id = 1;
+  string sandbox_id = 2;
+  string requested_sandbox_id = 3;
+  string disposition = 4;
+  repeated string command = 5;
+  string status = 6;
+  string stdout_path = 7;
+  string stderr_path = 8;
+  uint32 backend_pid = 9;
+  bool has_backend_pid = 10;
+  int32 exit_code = 11;
+  bool has_exit_code = 12;
+  string started_at = 13;
+  string finished_at = 14;
+  string expires_at = 15;
+}
+
+message StartProcessRequest {
+  string sandbox_id = 1;
+  repeated string command = 2;
+  string requested_sandbox_id = 3;
+  string disposition = 4;
+}
+
+message StartProcessResponse {
+  ProcessInfo process = 1;
+}
+
+message GetProcessRequest {
+  string process_id = 1;
+}
+
+message GetProcessResponse {
+  ProcessInfo process = 1;
+}
+
+message ListProcessesRequest {}
+
+message ListProcessesResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message ReadProcessLogRequest {
+  string process_id = 1;
+  string stream = 2;
+  uint64 offset = 3;
+  uint64 limit = 4;
+}
+
+message ReadProcessLogResponse {
+  string stream = 1;
+  uint64 offset = 2;
+  uint64 next_offset = 3;
+  bool eof = 4;
+  string contents = 5;
+}
+
+message WaitProcessRequest {
+  string process_id = 1;
+  uint64 timeout_secs = 2;
+}
+
+message WaitProcessResponse {
+  ProcessInfo process = 1;
+}
+
+message CancelProcessRequest {
+  string process_id = 1;
+}
+
+message CancelProcessResponse {
+  ProcessInfo process = 1;
+}
+
 message ShellOpenRequest {
   string sandbox_id = 1;
   repeated string command = 2;
@@ -201,6 +276,12 @@ service HyperboxControl {
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
   rpc InspectSandbox(InspectSandboxRequest) returns (InspectSandboxResponse);
   rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
+  rpc GetProcess(GetProcessRequest) returns (GetProcessResponse);
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+  rpc ReadProcessLog(ReadProcessLogRequest) returns (ReadProcessLogResponse);
+  rpc WaitProcess(WaitProcessRequest) returns (WaitProcessResponse);
+  rpc CancelProcess(CancelProcessRequest) returns (CancelProcessResponse);
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);

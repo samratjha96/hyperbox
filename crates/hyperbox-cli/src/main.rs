@@ -19,7 +19,10 @@ use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use hyperbox_core::config::normalize_allowlist_domains;
-use hyperbox_core::{ExecRequest, NetworkMode, SandboxConfig, SandboxId, SnapshotId};
+use hyperbox_core::{
+    ExecRequest, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, SandboxConfig, SandboxId,
+    SnapshotId, StreamName,
+};
 use hyperbox_proto::hyperbox::v1::{
     self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
 };
@@ -138,6 +141,12 @@ enum Command {
             help = "Force one-off execution (create + destroy sandbox for this run)"
         )]
         ephemeral: bool,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Start the command and return immediately with the process id"
+        )]
+        detach: bool,
     },
     /// Create a persistent sandbox and print its id.
     Create {
@@ -211,6 +220,38 @@ enum Command {
     },
     /// List active sandboxes.
     List {
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+    },
+    /// List managed processes.
+    Ps {
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+    },
+    /// Read managed process logs.
+    Logs {
+        #[arg(value_name = "PROCESS_ID", help = "Managed process id")]
+        process_id: String,
+        #[arg(
+            long,
+            default_value_t = false,
+            help = "Follow logs until the process exits"
+        )]
+        follow: bool,
+    },
+    /// Wait for a managed process to finish.
+    Wait {
+        #[arg(value_name = "PROCESS_ID", help = "Managed process id")]
+        process_id: String,
+        #[arg(long, default_value_t = 60, help = "Wait timeout in seconds")]
+        timeout: u64,
+        #[arg(long, default_value_t = false, help = "Emit JSON response")]
+        json: bool,
+    },
+    /// Cancel a managed process.
+    Cancel {
+        #[arg(value_name = "PROCESS_ID", help = "Managed process id")]
+        process_id: String,
         #[arg(long, default_value_t = false, help = "Emit JSON response")]
         json: bool,
     },
@@ -480,6 +521,7 @@ async fn main() -> anyhow::Result<()> {
             json,
             explain,
             ephemeral,
+            detach,
         } => {
             let run_server_scope = cli
                 .server_url
@@ -528,6 +570,7 @@ async fn main() -> anyhow::Result<()> {
                     writes,
                     reads,
                     json,
+                    detach,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -559,6 +602,7 @@ async fn main() -> anyhow::Result<()> {
                     writes,
                     reads,
                     json,
+                    detach,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -593,6 +637,7 @@ async fn main() -> anyhow::Result<()> {
                     writes,
                     reads,
                     json,
+                    detach,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -622,6 +667,7 @@ async fn main() -> anyhow::Result<()> {
                     writes,
                     reads,
                     json,
+                    detach,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -767,6 +813,80 @@ async fn main() -> anyhow::Result<()> {
                 );
             } else {
                 println!("{}", info.id.0);
+            }
+        }
+        Command::Ps { json } => {
+            let mut client = connect_client(cli.server_url, false).await?;
+            let processes = client.list_processes().await?;
+            if json {
+                let rows: Vec<ProcessListItemResponse> = processes
+                    .into_iter()
+                    .map(|process| ProcessListItemResponse::from(&process))
+                    .collect();
+                println!("{}", serde_json::to_string(&rows)?);
+            } else if processes.is_empty() {
+                eprintln!("no managed processes");
+            } else {
+                for process in processes {
+                    println!(
+                        "{}  {}  {}  {}",
+                        process.id.0,
+                        process.sandbox_id.0,
+                        format!("{:?}", process.status).to_ascii_lowercase(),
+                        process.command.join(" ")
+                    );
+                }
+            }
+        }
+        Command::Logs { process_id, follow } => {
+            let mut client = connect_client(cli.server_url, false).await?;
+            let process_id = parse_process_id(&process_id)?;
+            if follow {
+                let _ = stream_process_logs(&mut client, &process_id, false).await?;
+            } else {
+                let logs = read_process_logs_once(&mut client, &process_id).await?;
+                print!("{}", logs.stdout);
+                eprint!("{}", logs.stderr);
+            }
+        }
+        Command::Wait {
+            process_id,
+            timeout,
+            json,
+        } => {
+            let mut client = connect_client(cli.server_url, false).await?;
+            let process_id = parse_process_id(&process_id)?;
+            let process = client.wait_process(&process_id, timeout).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&ProcessInfoResponse::from(&process))?
+                );
+            } else {
+                println!(
+                    "{} {} {}",
+                    process.id.0,
+                    process.sandbox_id.0,
+                    format!("{:?}", process.status).to_ascii_lowercase()
+                );
+            }
+        }
+        Command::Cancel { process_id, json } => {
+            let mut client = connect_client(cli.server_url, false).await?;
+            let process_id = parse_process_id(&process_id)?;
+            let process = client.cancel_process(&process_id).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&ProcessInfoResponse::from(&process))?
+                );
+            } else {
+                println!(
+                    "{} {} {}",
+                    process.id.0,
+                    process.sandbox_id.0,
+                    format!("{:?}", process.status).to_ascii_lowercase()
+                );
             }
         }
         Command::Shell {
@@ -982,6 +1102,12 @@ fn parse_sandbox_id(raw: &str) -> anyhow::Result<SandboxId> {
     let id = uuid::Uuid::parse_str(raw)
         .with_context(|| format!("invalid sandbox id `{raw}`: expected UUID"))?;
     Ok(SandboxId(id))
+}
+
+fn parse_process_id(raw: &str) -> anyhow::Result<ProcessId> {
+    let id = uuid::Uuid::parse_str(raw)
+        .with_context(|| format!("invalid process id `{raw}`: expected UUID"))?;
+    Ok(ProcessId(id))
 }
 
 fn parse_snapshot_id(raw: &str) -> anyhow::Result<SnapshotId> {
@@ -1507,6 +1633,7 @@ async fn run_remote_with_client(
     writes: Vec<String>,
     reads: Vec<String>,
     json: bool,
+    detach: bool,
     effective_isolation: Option<&EffectiveIsolationSummary>,
     explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<()> {
@@ -1532,16 +1659,12 @@ async fn run_remote_with_client(
 
         run_ensure_commands_with_client(client, &sandbox.id, &ensure_commands, timeout).await?;
 
-        let exec_started = Instant::now();
-        let outcome = exec_shell_command_with_client(client, &sandbox.id, &cmd, timeout).await?;
-        info!(
-            sandbox_id = %sandbox.id.0,
-            stage = "exec",
-            elapsed_ms = exec_started.elapsed().as_millis() as u64,
-            exec_duration_ms = outcome.duration_ms as u64,
-            exit_code = outcome.exit_code,
-            "run command execution completed"
-        );
+        let process = start_shell_command_with_client(client, &sandbox.id, &cmd).await?;
+        if detach {
+            emit_process_start(&process, json, effective_isolation, explain)?;
+            return Ok(0);
+        }
+        let outcome = wait_for_process_outcome(client, &process.id, timeout, json).await?;
 
         let mut artifacts = Vec::new();
         for path in reads {
@@ -1591,6 +1714,7 @@ async fn run_existing_with_client(
     writes: Vec<String>,
     reads: Vec<String>,
     json: bool,
+    detach: bool,
     effective_isolation: Option<&EffectiveIsolationSummary>,
     explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<()> {
@@ -1605,7 +1729,12 @@ async fn run_existing_with_client(
 
     run_ensure_commands_with_client(client, &sandbox_id, &ensure_commands, timeout).await?;
 
-    let outcome = exec_shell_command_with_client(client, &sandbox_id, &cmd, timeout).await?;
+    let process = start_shell_command_with_client(client, &sandbox_id, &cmd).await?;
+    if detach {
+        emit_process_start(&process, json, effective_isolation, explain)?;
+        return Ok(());
+    }
+    let outcome = wait_for_process_outcome(client, &process.id, timeout, json).await?;
 
     let mut artifacts = Vec::new();
     for path in reads {
@@ -1654,21 +1783,195 @@ async fn run_ensure_commands_with_client(
     Ok(())
 }
 
-async fn exec_shell_command_with_client(
+async fn start_shell_command_with_client(
     client: &mut GrpcControlClient,
     sandbox_id: &SandboxId,
     cmd: &str,
-    timeout_secs: u64,
-) -> anyhow::Result<hyperbox_core::ExecOutcome> {
+) -> anyhow::Result<ProcessInfo> {
     client
-        .exec(
+        .start_process(
             sandbox_id,
-            ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.to_string()],
-                timeout_secs,
-            },
+            vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.to_string()],
+            None,
+            ProcessDisposition::ReusedExisting,
         )
         .await
+}
+
+#[derive(Default)]
+struct ProcessLogs {
+    stdout: String,
+    stderr: String,
+}
+
+async fn wait_for_process_outcome(
+    client: &mut GrpcControlClient,
+    process_id: &ProcessId,
+    timeout_secs: u64,
+    json: bool,
+) -> anyhow::Result<hyperbox_core::ExecOutcome> {
+    let started = Instant::now();
+    let logs = if json {
+        let process = client.wait_process(process_id, timeout_secs).await?;
+        let logs = read_process_logs_once(client, process_id).await?;
+        let duration_ms = process
+            .finished_at
+            .map(|finished_at| (finished_at - process.started_at).num_milliseconds().max(0) as u128)
+            .unwrap_or_else(|| started.elapsed().as_millis());
+        return Ok(hyperbox_core::ExecOutcome {
+            exit_code: process.exit_code.unwrap_or(1),
+            stdout: logs.stdout,
+            stderr: logs.stderr,
+            duration_ms,
+        });
+    } else {
+        stream_process_logs(client, process_id, true).await?
+    };
+
+    let process = client.wait_process(process_id, timeout_secs).await?;
+    let duration_ms = process
+        .finished_at
+        .map(|finished_at| (finished_at - process.started_at).num_milliseconds().max(0) as u128)
+        .unwrap_or_else(|| started.elapsed().as_millis());
+    Ok(hyperbox_core::ExecOutcome {
+        exit_code: process.exit_code.unwrap_or(1),
+        stdout: logs.stdout,
+        stderr: logs.stderr,
+        duration_ms,
+    })
+}
+
+async fn read_process_logs_once(
+    client: &mut GrpcControlClient,
+    process_id: &ProcessId,
+) -> anyhow::Result<ProcessLogs> {
+    let stdout = read_process_log_all(client, process_id, StreamName::Stdout).await?;
+    let stderr = read_process_log_all(client, process_id, StreamName::Stderr).await?;
+    Ok(ProcessLogs { stdout, stderr })
+}
+
+async fn read_process_log_all(
+    client: &mut GrpcControlClient,
+    process_id: &ProcessId,
+    stream: StreamName,
+) -> anyhow::Result<String> {
+    let mut offset = 0u64;
+    let mut contents = String::new();
+    loop {
+        let chunk = client
+            .read_process_log(process_id, stream.clone(), offset, 8192)
+            .await?;
+        if chunk.contents.is_empty() {
+            if chunk.eof {
+                return Ok(contents);
+            }
+        } else {
+            offset = chunk.next_offset;
+            contents.push_str(&chunk.contents);
+        }
+        if chunk.eof {
+            return Ok(contents);
+        }
+    }
+}
+
+async fn stream_process_logs(
+    client: &mut GrpcControlClient,
+    process_id: &ProcessId,
+    stop_on_exit: bool,
+) -> anyhow::Result<ProcessLogs> {
+    let mut stdout_offset = 0u64;
+    let mut stderr_offset = 0u64;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut out = tokio::io::stdout();
+    let mut err = tokio::io::stderr();
+
+    loop {
+        let stdout_chunk = client
+            .read_process_log(process_id, StreamName::Stdout, stdout_offset, 8192)
+            .await?;
+        if !stdout_chunk.contents.is_empty() {
+            stdout_offset = stdout_chunk.next_offset;
+            stdout.push_str(&stdout_chunk.contents);
+            out.write_all(stdout_chunk.contents.as_bytes()).await?;
+            out.flush().await?;
+        }
+
+        let stderr_chunk = client
+            .read_process_log(process_id, StreamName::Stderr, stderr_offset, 8192)
+            .await?;
+        if !stderr_chunk.contents.is_empty() {
+            stderr_offset = stderr_chunk.next_offset;
+            stderr.push_str(&stderr_chunk.contents);
+            err.write_all(stderr_chunk.contents.as_bytes()).await?;
+            err.flush().await?;
+        }
+
+        let process = client.get_process(process_id).await?;
+        if process.status.is_terminal() {
+            if stop_on_exit {
+                loop {
+                    let chunk = client
+                        .read_process_log(process_id, StreamName::Stdout, stdout_offset, 8192)
+                        .await?;
+                    if chunk.contents.is_empty() {
+                        break;
+                    }
+                    stdout_offset = chunk.next_offset;
+                    stdout.push_str(&chunk.contents);
+                    out.write_all(chunk.contents.as_bytes()).await?;
+                    out.flush().await?;
+                    if chunk.eof {
+                        break;
+                    }
+                }
+                loop {
+                    let chunk = client
+                        .read_process_log(process_id, StreamName::Stderr, stderr_offset, 8192)
+                        .await?;
+                    if chunk.contents.is_empty() {
+                        break;
+                    }
+                    stderr_offset = chunk.next_offset;
+                    stderr.push_str(&chunk.contents);
+                    err.write_all(chunk.contents.as_bytes()).await?;
+                    err.flush().await?;
+                    if chunk.eof {
+                        break;
+                    }
+                }
+            }
+            return Ok(ProcessLogs { stdout, stderr });
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn emit_process_start(
+    process: &ProcessInfo,
+    json: bool,
+    effective_isolation: Option<&EffectiveIsolationSummary>,
+    explain: Option<&ExplainDetails>,
+) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&ProcessStartResponse {
+                process: ProcessInfoResponse::from(process),
+                effective_isolation: effective_isolation.cloned(),
+                explain: explain.cloned(),
+            })?
+        );
+    } else {
+        println!("process_id: {}", process.id.0);
+        println!("sandbox_id: {}", process.sandbox_id.0);
+        println!(
+            "disposition: {}",
+            format!("{:?}", process.disposition).to_ascii_lowercase()
+        );
+    }
+    Ok(())
 }
 
 async fn shell_command(
@@ -2431,6 +2734,70 @@ struct ListSandboxItemResponse {
     template: String,
     state: String,
     created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessInfoResponse {
+    process_id: String,
+    sandbox_id: String,
+    requested_sandbox_id: Option<String>,
+    disposition: String,
+    status: String,
+    command: Vec<String>,
+    exit_code: Option<i32>,
+    started_at: String,
+    finished_at: Option<String>,
+    expires_at: Option<String>,
+}
+
+impl From<&ProcessInfo> for ProcessInfoResponse {
+    fn from(value: &ProcessInfo) -> Self {
+        Self {
+            process_id: value.id.0.to_string(),
+            sandbox_id: value.sandbox_id.0.to_string(),
+            requested_sandbox_id: value
+                .requested_sandbox_id
+                .as_ref()
+                .map(|id| id.0.to_string()),
+            disposition: format!("{:?}", value.disposition).to_ascii_lowercase(),
+            status: format!("{:?}", value.status).to_ascii_lowercase(),
+            command: value.command.clone(),
+            exit_code: value.exit_code,
+            started_at: value.started_at.to_rfc3339(),
+            finished_at: value.finished_at.map(|time| time.to_rfc3339()),
+            expires_at: value.expires_at.map(|time| time.to_rfc3339()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessListItemResponse {
+    process_id: String,
+    sandbox_id: String,
+    status: String,
+    command: Vec<String>,
+    started_at: String,
+}
+
+impl From<&ProcessInfo> for ProcessListItemResponse {
+    fn from(value: &ProcessInfo) -> Self {
+        Self {
+            process_id: value.id.0.to_string(),
+            sandbox_id: value.sandbox_id.0.to_string(),
+            status: format!("{:?}", value.status).to_ascii_lowercase(),
+            command: value.command.clone(),
+            started_at: value.started_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessStartResponse {
+    process: ProcessInfoResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_isolation: Option<EffectiveIsolationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explain: Option<ExplainDetails>,
 }
 
 async fn bench_local(
