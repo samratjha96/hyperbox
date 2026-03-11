@@ -1233,10 +1233,18 @@ impl SandboxBackend for AppleVzBackend {
     }
 
     async fn inspect(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
-        if let Some(info) = self.sandboxes.lock().await.get(sandbox_id).map(|sandbox| {
-            let _ = &sandbox.config;
-            sandbox.info.clone()
-        }) {
+        let sandbox = {
+            let sandboxes = self.sandboxes.lock().await;
+            sandboxes
+                .get(sandbox_id)
+                .map(|sandbox| (sandbox.direct_container.is_some(), sandbox.info.clone()))
+        };
+
+        if let Some((is_direct_container, info)) = sandbox {
+            if is_direct_container {
+                return self.inspect_container_fallback(sandbox_id).await;
+            }
+
             return Ok(info);
         }
 
@@ -1487,10 +1495,15 @@ fn container_network_args(network: &NetworkMode) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppleBackendConfig, AppleRuntimeKind, AppleVzBackend, apple_allowlist_supported,
-        container_network_args, ensure_supported_apple_network_mode,
+        AppleBackendConfig, AppleRuntimeKind, AppleSandbox, AppleVzBackend, DirectContainerSandbox,
+        apple_allowlist_supported, container_network_args, ensure_supported_apple_network_mode,
     };
-    use hyperbox_core::{HyperboxError, NetworkMode, SandboxBackend, SandboxConfig};
+    use chrono::Utc;
+    use hyperbox_core::{
+        HyperboxError, NetworkMode, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
+        SandboxState,
+    };
+    use std::{fs, path::PathBuf};
 
     #[tokio::test]
     async fn create_requires_helper_command() {
@@ -1565,5 +1578,68 @@ mod tests {
         assert_eq!(none_args, vec!["--network".to_string(), "none".to_string()]);
         let full_args = container_network_args(&NetworkMode::Full).expect("full args");
         assert!(full_args.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inspect_checks_direct_container_state_for_existing_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "hyperbox-apple-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let mock_container = root.join("mock-container");
+        fs::write(
+            &mock_container,
+            "#!/bin/sh\nif [ \"$1\" = \"inspect\" ]; then\n  echo 'Error: container not found' >&2\n  exit 1\nfi\nexit 0\n",
+        )
+        .expect("write mock container");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&mock_container)
+                .expect("stat mock container")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&mock_container, perms).expect("chmod mock container");
+        }
+
+        let backend = AppleVzBackend::new(AppleBackendConfig {
+            launch_command: Some(vec![
+                "hyperbox".to_string(),
+                "apple-helper".to_string(),
+                "--container-bin".to_string(),
+                mock_container.to_string_lossy().to_string(),
+            ]),
+            runtime_kind: AppleRuntimeKind::Containerization,
+            ..AppleBackendConfig::default()
+        });
+        let sandbox_id = SandboxId::new();
+        backend.sandboxes.lock().await.insert(
+            sandbox_id.clone(),
+            AppleSandbox {
+                info: SandboxInfo {
+                    id: sandbox_id.clone(),
+                    template: "python:3.12".to_string(),
+                    state: SandboxState::Ready,
+                    created_at: Utc::now(),
+                },
+                config: SandboxConfig::default(),
+                direct_container: Some(DirectContainerSandbox {
+                    container_name: format!("hyperbox-{}", sandbox_id.0),
+                    workspace_host: PathBuf::from("/tmp/unused"),
+                    ephemeral_workspace: true,
+                }),
+            },
+        );
+
+        let err = backend
+            .inspect(&sandbox_id)
+            .await
+            .expect_err("inspect should reject stale direct container entries");
+        assert!(matches!(err, HyperboxError::SandboxNotFound(_)));
+        let _ = fs::remove_dir_all(&root);
     }
 }
