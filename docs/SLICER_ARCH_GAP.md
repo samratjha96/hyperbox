@@ -46,7 +46,7 @@ Date: 2026-03-05
 1. Implement Firecracker allowlist data path:
    - resolve exact allowlist domains at create time,
    - populate per-VM `ipset`,
-   - reject wildcard entries until DNS proxy-driven dynamic updates are added.
+   - keep wildcard entries unsupported until DNS proxy-driven dynamic updates are added.
 2. Wire DNS proxy + dynamic set refresh:
    - force DNS path through host proxy,
    - update nft/ipset with TTL-aware entries.

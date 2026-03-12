@@ -55,6 +55,8 @@ def allows(host):
     for entry in ALLOWLIST:
         if host == entry:
             return True
+        if entry.startswith("*.") and host.endswith(entry[1:]):
+            return True
     return False
 
 
@@ -1203,9 +1205,12 @@ mod tests {
     }
 
     #[test]
-    fn helper_network_parser_rejects_wildcard_allowlist_entries() {
-        let err = HelperNetworkMode::parse("allowlist", vec!["*.example.com".to_string()])
-            .expect_err("wildcards must be rejected");
-        assert!(err.to_string().contains("wildcard"));
+    fn helper_network_parser_accepts_wildcard_allowlist_entries() {
+        let mode = HelperNetworkMode::parse("allowlist", vec!["*.example.com".to_string()])
+            .expect("wildcards should be accepted");
+        assert_eq!(
+            mode,
+            HelperNetworkMode::Allowlist(vec!["*.example.com".to_string()])
+        );
     }
 }

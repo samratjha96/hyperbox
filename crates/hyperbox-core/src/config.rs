@@ -31,20 +31,33 @@ pub fn normalize_allowlist_domains(domains: &[String]) -> std::result::Result<Ve
         if domain.is_empty() {
             return Err("allowlist domains must be non-empty".to_string());
         }
-        if domain.contains('*') {
-            return Err(
-                "wildcard allowlist entries are not supported; use explicit domains".to_string(),
-            );
-        }
         if domain.contains('/') || domain.contains(':') || domain.contains(char::is_whitespace) {
             return Err(format!(
                 "allowlist entry `{domain}` must be a bare domain (no scheme, port, path, or spaces)"
             ));
         }
-        if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
+        let normalized_domain = if let Some(suffix) = domain.strip_prefix("*.") {
+            if suffix.is_empty() || suffix.contains('*') {
+                return Err(format!(
+                    "allowlist entry `{domain}` has an invalid wildcard; use leading `*.` only"
+                ));
+            }
+            format!("*.{suffix}")
+        } else {
+            if domain.contains('*') {
+                return Err(format!(
+                    "allowlist entry `{domain}` has an invalid wildcard; use leading `*.` only"
+                ));
+            }
+            domain.clone()
+        };
+        let hostname = normalized_domain
+            .strip_prefix("*.")
+            .unwrap_or(&normalized_domain);
+        if hostname.starts_with('.') || hostname.ends_with('.') || hostname.contains("..") {
             return Err(format!("allowlist entry `{domain}` is not a valid domain"));
         }
-        if !domain
+        if !hostname
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.')
         {
@@ -52,8 +65,8 @@ pub fn normalize_allowlist_domains(domains: &[String]) -> std::result::Result<Ve
                 "allowlist entry `{domain}` contains unsupported characters"
             ));
         }
-        if seen.insert(domain.clone()) {
-            normalized.push(domain);
+        if seen.insert(normalized_domain.clone()) {
+            normalized.push(normalized_domain);
         }
     }
 
@@ -80,9 +93,16 @@ mod tests {
     use super::normalize_allowlist_domains;
 
     #[test]
-    fn normalize_allowlist_rejects_wildcards() {
-        let err = normalize_allowlist_domains(&["*.example.com".to_string()])
-            .expect_err("wildcards must be rejected");
+    fn normalize_allowlist_accepts_wildcard_subdomains() {
+        let domains = normalize_allowlist_domains(&["*.Example.com".to_string()])
+            .expect("wildcard subdomains should normalize");
+        assert_eq!(domains, vec!["*.example.com"]);
+    }
+
+    #[test]
+    fn normalize_allowlist_rejects_invalid_wildcards() {
+        let err = normalize_allowlist_domains(&["*example.com".to_string()])
+            .expect_err("invalid wildcards must be rejected");
         assert!(err.contains("wildcard"));
     }
 

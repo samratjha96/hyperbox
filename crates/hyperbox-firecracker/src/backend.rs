@@ -338,6 +338,11 @@ fn create_symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
 
 async fn resolve_allowlist_ips(domains: &[String]) -> Result<Vec<IpAddr>> {
     let domains = normalize_allowlist_domains(domains).map_err(HyperboxError::InvalidConfig)?;
+    if let Some(domain) = domains.iter().find(|domain| domain.starts_with("*.")) {
+        return Err(HyperboxError::InvalidConfig(format!(
+            "firecracker allowlist does not support wildcard domain `{domain}` yet"
+        )));
+    }
     let mut resolved = BTreeSet::new();
     for domain in domains {
         let entries = tokio::net::lookup_host((domain.as_str(), 443))
@@ -727,8 +732,11 @@ impl SandboxBackend for FirecrackerBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{FirecrackerBackend, FirecrackerBackendConfig, parse_agent_socket_addr};
-    use hyperbox_core::{NetworkMode, Result, SandboxConfig, SandboxId};
+    use super::{
+        FirecrackerBackend, FirecrackerBackendConfig, parse_agent_socket_addr,
+        resolve_allowlist_ips,
+    };
+    use hyperbox_core::{HyperboxError, NetworkMode, Result, SandboxConfig, SandboxId};
 
     #[test]
     fn parses_agent_socket_addr_from_url() {
@@ -817,5 +825,15 @@ mod tests {
 
         tokio::fs::remove_dir_all(base).await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_allowlist_ips_rejects_wildcards() {
+        let err = resolve_allowlist_ips(&["*.example.com".to_string()])
+            .await
+            .expect_err("wildcards should be rejected for firecracker");
+        assert!(
+            matches!(err, HyperboxError::InvalidConfig(message) if message.contains("wildcard"))
+        );
     }
 }

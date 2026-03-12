@@ -28,7 +28,8 @@ Each response is one JSON object per line written to helper stdout.
     - creates a sandbox-scoped network
     - starts a DNS allowlist sidecar (`python:3.12`)
     - wires sandbox DNS to sidecar and returns `NXDOMAIN` for non-allowlisted domains
-    - accepts explicit hostnames only (wildcard entries are rejected)
+    - accepts explicit hostnames and wildcard subdomain patterns like `*.example.com`
+    - wildcard entries are strict subdomain matches; the apex domain must be listed separately
   - workspace bind mount to `/workspace`
   - deterministic container name `hyperbox-<sandbox_id>`
 - `exec` uses `container exec --workdir /workspace`

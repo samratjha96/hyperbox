@@ -91,7 +91,7 @@ enum Command {
         #[arg(
             long = "allow",
             value_name = "DOMAIN",
-            help = "Allowlisted domain (exact hostname; repeat for multiple domains, only with allowlist mode)"
+            help = "Allowlisted domain or wildcard subdomain pattern (repeat for multiple entries, only with allowlist mode)"
         )]
         allow: Vec<String>,
         #[arg(
@@ -167,7 +167,7 @@ enum Command {
         #[arg(
             long = "allow",
             value_name = "DOMAIN",
-            help = "Allowlisted domain (exact hostname; repeat for multiple domains, only with allowlist mode)"
+            help = "Allowlisted domain or wildcard subdomain pattern (repeat for multiple entries, only with allowlist mode)"
         )]
         allow: Vec<String>,
         #[arg(
@@ -303,7 +303,7 @@ enum Command {
             long = "allow",
             value_name = "DOMAIN",
             conflicts_with = "sandbox_id",
-            help = "Allowlisted domain for ephemeral shell creation (exact hostname)"
+            help = "Allowlisted domain or wildcard subdomain pattern for ephemeral shell creation"
         )]
         allow: Vec<String>,
         #[arg(
@@ -355,7 +355,7 @@ enum Command {
         #[arg(
             long = "allow",
             value_name = "DOMAIN",
-            help = "Allowlisted domain (exact hostname; repeat for multiple domains, only with allowlist mode)"
+            help = "Allowlisted domain or wildcard subdomain pattern (repeat for multiple entries, only with allowlist mode)"
         )]
         allow: Vec<String>,
         #[arg(long, default_value_t = 60, help = "Default exec timeout in seconds")]
@@ -3068,15 +3068,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_network_policy_rejects_wildcard_allowlist_entries() {
-        let err = resolve_network_policy(
+    fn resolve_network_policy_accepts_wildcard_allowlist_entries() {
+        let resolved = resolve_network_policy(
             None,
             Some(NetworkArg::Allowlist),
             vec!["*.example.com".to_string()],
             None,
         )
-        .expect_err("wildcards must be rejected");
-        assert!(err.to_string().contains("wildcard"));
+        .expect("wildcards should be accepted");
+        match resolved.network_mode {
+            NetworkMode::Allowlist(domains) => {
+                assert_eq!(domains, vec!["*.example.com"]);
+            }
+            other => panic!("expected allowlist mode, got {other:?}"),
+        }
     }
 
     #[test]

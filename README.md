@@ -95,7 +95,7 @@ $HB run --profile full --cmd "pytest -q"
 ### Network model
 
 - `none`: no external network access
-- `allowlist`: explicit hostnames only (wildcards not supported)
+- `allowlist`: explicit hostnames plus wildcard subdomain patterns like `*.example.com` on supported backends
 - `full`: unrestricted network
 - Allowlist availability can vary by host/runtime capabilities; `--explain` shows effective enforcement.
 
@@ -324,7 +324,7 @@ $HB run --profile full --cmd "pytest -q"
 
 ## Security Notes and Current Limits
 
-- Allowlist entries are explicit hostnames only; wildcard patterns are rejected.
+- On macOS helper-managed networking, allowlist entries may include wildcard subdomain patterns like `*.example.com`; the apex domain must be listed separately if needed.
 - On macOS, allowlist enforcement is currently DNS/domain-based (host-level direct-IP firewall blocking is not yet implemented).
 - `--workspace` intentionally maps host files into sandbox context; writes there are host-visible by design.
 - `HYPERBOX_BACKEND=local` is a non-isolated fallback intended for local development/testing only.
