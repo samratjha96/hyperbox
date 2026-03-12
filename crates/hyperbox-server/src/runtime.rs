@@ -230,7 +230,10 @@ impl HyperboxServer {
             )));
         }
 
-        self.refresh_process(process).await
+        let mut running = process;
+        running.status = ProcessStatus::Running;
+        self.snapshots.upsert_process(&running).await?;
+        Ok(running)
     }
 
     pub async fn start_run(&self, request: StartRunRequest) -> Result<StartedRun> {
@@ -400,11 +403,47 @@ impl HyperboxServer {
         };
         let total = self.read_log_size(&process.sandbox_id, &path).await?;
         if offset >= total {
+            let refreshed = self.refresh_process(process.clone()).await?;
+            if !refreshed.status.is_terminal() {
+                sleep(Duration::from_millis(50)).await;
+                let retried_total = self.read_log_size(&process.sandbox_id, &path).await?;
+                if retried_total > offset {
+                    let chunk_limit = limit.max(1);
+                    let outcome = self
+                        .backend
+                        .exec(
+                            &process.sandbox_id,
+                            ExecRequest {
+                                command: vec![
+                                    "/bin/sh".to_string(),
+                                    "-lc".to_string(),
+                                    format!(
+                                        "path={}; if [ ! -f \"$path\" ]; then exit 0; fi; tail -c +{} \"$path\" | head -c {}",
+                                        shell_escape(&path),
+                                        offset + 1,
+                                        chunk_limit
+                                    ),
+                                ],
+                                timeout_secs: 5,
+                            },
+                        )
+                        .await?;
+                    let contents = outcome.stdout;
+                    let next_offset = offset + contents.len() as u64;
+                    return Ok(ProcessLogRead {
+                        stream,
+                        offset,
+                        next_offset,
+                        eof: next_offset >= retried_total,
+                        contents,
+                    });
+                }
+            }
             return Ok(ProcessLogRead {
                 stream,
                 offset,
                 next_offset: offset,
-                eof: true,
+                eof: refreshed.status.is_terminal(),
                 contents: String::new(),
             });
         }
@@ -958,6 +997,10 @@ fn process_expiry_at(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     )
 }
 
+fn process_lost_grace() -> ChronoDuration {
+    ChronoDuration::seconds(5)
+}
+
 fn process_launch_command(process: &ProcessInfo) -> Result<String> {
     let base = process_dir(&process.id);
     let command = shell_join(&process.command);
@@ -1029,7 +1072,7 @@ fn parse_process_probe(process: &ProcessInfo, probe: &str) -> Result<ProcessInfo
         return Ok(updated);
     }
     if probe == "lost" {
-        if (now - updated.started_at) < ChronoDuration::seconds(1) {
+        if (now - updated.started_at) < process_lost_grace() {
             updated.status = ProcessStatus::Starting;
             updated.exit_code = None;
             updated.finished_at = None;
@@ -1147,7 +1190,83 @@ mod tests {
     use super::*;
     use crate::LocalBackend;
     use hyperbox_core::{ProcessDisposition, ProcessStatus, StreamName};
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+
+    struct CountingBackend {
+        inner: Arc<dyn SandboxBackend>,
+        exec_calls: AtomicUsize,
+    }
+
+    impl CountingBackend {
+        fn new(inner: Arc<dyn SandboxBackend>) -> Self {
+            Self {
+                inner,
+                exec_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn exec_calls(&self) -> usize {
+            self.exec_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl SandboxBackend for CountingBackend {
+        async fn create(&self, config: SandboxConfig) -> Result<hyperbox_core::SandboxLease> {
+            self.inner.create(config).await
+        }
+
+        async fn exec(&self, sandbox_id: &SandboxId, req: ExecRequest) -> Result<ExecOutcome> {
+            self.exec_calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.exec(sandbox_id, req).await
+        }
+
+        async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
+            self.inner.read_file(sandbox_id, path).await
+        }
+
+        async fn write_file(&self, sandbox_id: &SandboxId, payload: FilePayload) -> Result<()> {
+            self.inner.write_file(sandbox_id, payload).await
+        }
+
+        async fn destroy(&self, sandbox_id: &SandboxId) -> Result<()> {
+            self.inner.destroy(sandbox_id).await
+        }
+
+        async fn inspect(&self, sandbox_id: &SandboxId) -> Result<SandboxInfo> {
+            self.inner.inspect(sandbox_id).await
+        }
+
+        async fn create_snapshot(
+            &self,
+            sandbox_id: &SandboxId,
+            snapshot_id: &SnapshotId,
+            artifact_path: &Path,
+        ) -> Result<()> {
+            self.inner
+                .create_snapshot(sandbox_id, snapshot_id, artifact_path)
+                .await
+        }
+
+        async fn restore_snapshot(
+            &self,
+            snapshot_id: &SnapshotId,
+            artifact_path: &Path,
+            config: SandboxConfig,
+        ) -> Result<hyperbox_core::SandboxLease> {
+            self.inner
+                .restore_snapshot(snapshot_id, artifact_path, config)
+                .await
+        }
+    }
 
     fn unique_test_root(name: &str) -> PathBuf {
         let suffix = std::time::SystemTime::now()
@@ -1293,6 +1412,38 @@ mod tests {
         assert_eq!(stderr.contents, "err");
     }
 
+    #[tokio::test]
+    async fn start_process_launches_with_single_backend_exec() {
+        let inner: Arc<dyn SandboxBackend> = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-launch-count-test",
+        ))));
+        let backend = Arc::new(CountingBackend::new(inner));
+        let server = HyperboxServer::new(backend.clone());
+
+        let sandbox = server
+            .create_sandbox(SandboxConfig::default())
+            .await
+            .expect("create sandbox");
+
+        let process = server
+            .start_process(
+                &sandbox.id,
+                vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "sleep 30".to_string(),
+                ],
+                None,
+                ProcessDisposition::ReusedExisting,
+                false,
+            )
+            .await
+            .expect("start process");
+
+        assert_eq!(process.status, ProcessStatus::Running);
+        assert_eq!(backend.exec_calls(), 1);
+    }
+
     #[test]
     fn process_launch_command_sets_up_logs_inline() {
         let process_id = ProcessId::new();
@@ -1324,6 +1475,31 @@ mod tests {
         assert!(launch.contains("stderr.log"));
         assert!(launch.contains("exit_code"));
         assert!(!launch.contains("launch.sh"));
+    }
+
+    #[test]
+    fn lost_probe_stays_non_terminal_within_grace_period() {
+        let now = Utc::now();
+        let process = ProcessInfo {
+            id: ProcessId::new(),
+            sandbox_id: SandboxId::new(),
+            requested_sandbox_id: None,
+            disposition: ProcessDisposition::ReusedExisting,
+            destroy_sandbox_on_expiry: false,
+            command: vec!["sleep".to_string(), "1".to_string()],
+            status: ProcessStatus::Running,
+            stdout_path: "stdout.log".to_string(),
+            stderr_path: "stderr.log".to_string(),
+            backend_pid: Some(123),
+            exit_code: None,
+            started_at: now - ChronoDuration::seconds(2),
+            finished_at: None,
+            expires_at: None,
+        };
+
+        let parsed = parse_process_probe(&process, "lost").expect("parse lost probe");
+        assert_eq!(parsed.status, ProcessStatus::Starting);
+        assert!(parsed.finished_at.is_none());
     }
 
     #[tokio::test]
