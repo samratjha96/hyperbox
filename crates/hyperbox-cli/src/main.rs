@@ -340,6 +340,7 @@ enum Command {
     Setup,
     /// Start JSON-lines proxy mode for adapter integrations.
     #[command(
+        hide = true,
         after_help = "Protocol:\n  read JSON lines from stdin, write JSON lines to stdout.\n  requests: {\"op\":\"ping\"} | {\"op\":\"exec\",\"cmd\":\"...\",\"timeout\":60} | {\"op\":\"read\",\"path\":\"...\"} | {\"op\":\"write\",\"path\":\"...\",\"content\":\"...\"} | {\"op\":\"destroy\"}\n  responses include op-specific fields or {\"op\":\"error\",\"message\":\"...\"}"
     )]
     Proxy {

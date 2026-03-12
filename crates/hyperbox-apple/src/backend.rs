@@ -147,7 +147,6 @@ impl AppleHelperSession {
 
 struct AppleSandbox {
     info: SandboxInfo,
-    config: SandboxConfig,
     direct_container: Option<DirectContainerSandbox>,
 }
 
@@ -749,7 +748,6 @@ impl SandboxBackend for AppleVzBackend {
             id.clone(),
             AppleSandbox {
                 info: info.clone(),
-                config,
                 direct_container,
             },
         );
@@ -1660,7 +1658,6 @@ mod tests {
                     state: SandboxState::Ready,
                     created_at: Utc::now(),
                 },
-                config: SandboxConfig::default(),
                 direct_container: Some(DirectContainerSandbox {
                     container_name: format!("hyperbox-{}", sandbox_id.0),
                     workspace_host: PathBuf::from("/tmp/unused"),
@@ -1729,7 +1726,6 @@ done
                     state: SandboxState::Ready,
                     created_at: Utc::now(),
                 },
-                config: SandboxConfig::default(),
                 direct_container: None,
             },
         );

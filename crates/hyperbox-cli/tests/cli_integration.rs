@@ -101,6 +101,18 @@ fn probe_outputs_json() {
 }
 
 #[test]
+fn help_hides_internal_proxy_command() {
+    let out = Command::new(hyperbox_bin())
+        .arg("--help")
+        .output()
+        .expect("run help");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("\n  proxy"));
+}
+
+#[test]
 fn run_reuses_session_by_default() {
     let Some((mut server, url)) = spawn_server() else {
         return;
