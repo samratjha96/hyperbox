@@ -595,8 +595,14 @@ export class HyperboxClient {
     const completed = await this.waitProcess(started.process.processId, {
       timeoutSecs: options.timeoutSecs ?? 60,
     });
-    const stdout = await this.readAllProcessLog(started.process.processId, "stdout");
-    const stderr = await this.readAllProcessLog(started.process.processId, "stderr");
+    const stdout = await this.readOptionalUtf8File(
+      started.sandbox.id,
+      completed.stdoutPath,
+    );
+    const stderr = await this.readOptionalUtf8File(
+      started.sandbox.id,
+      completed.stderrPath,
+    );
     const artifacts: Record<string, string> = {};
     for (const path of options.reads ?? []) {
       const bytes = await this.readFile(started.sandbox.id, path);
@@ -618,21 +624,26 @@ export class HyperboxClient {
     };
   }
 
-  private async readAllProcessLog(
-    processId: string,
-    stream: LogStream,
+  private async readOptionalUtf8File(
+    sandboxId: string,
+    path: string,
   ): Promise<string> {
-    let offset = 0;
-    let contents = "";
-    while (true) {
-      const chunk = await this.readProcessLog(processId, stream, { offset });
-      if (chunk.contents) {
-        contents += chunk.contents;
-        offset = chunk.nextOffset;
+    try {
+      const bytes = await this.readFile(sandboxId, path);
+      return Buffer.from(bytes).toString("utf8");
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return "";
       }
-      if (chunk.eof) {
-        return contents;
-      }
+      throw error;
     }
   }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return message.includes("not found") || message.includes("code 5");
 }

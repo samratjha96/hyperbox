@@ -203,23 +203,16 @@ impl HyperboxServer {
         };
         self.snapshots.upsert_process(&process).await?;
 
-        let launcher = process_launch_script(&process)?;
-        self.backend
-            .write_file(
-                sandbox_id,
-                FilePayload {
-                    path: process_launch_path(&process.id).into(),
-                    bytes: launcher.into_bytes(),
-                },
-            )
-            .await?;
-
         let launch = self
             .backend
             .exec(
                 sandbox_id,
                 ExecRequest {
-                    command: vec!["/bin/sh".to_string(), process_launch_path(&process.id)],
+                    command: vec![
+                        "/bin/sh".to_string(),
+                        "-lc".to_string(),
+                        process_launch_command(&process)?,
+                    ],
                     timeout_secs: 5,
                 },
             )
@@ -394,7 +387,13 @@ impl HyperboxServer {
         limit: u64,
     ) -> Result<ProcessLogRead> {
         self.ensure_hydrated().await?;
-        let process = self.get_process(process_id).await?;
+        let process = self
+            .snapshots
+            .get_process(process_id)
+            .await?
+            .ok_or_else(|| {
+                HyperboxError::ExecutionFailed(format!("process not found: {}", process_id.0))
+            })?;
         let path = match stream {
             StreamName::Stdout => process.stdout_path.clone(),
             StreamName::Stderr => process.stderr_path.clone(),
@@ -929,10 +928,6 @@ fn process_dir(process_id: &ProcessId) -> String {
     format!(".hyperbox/processes/{}", process_id.0)
 }
 
-fn process_launch_path(process_id: &ProcessId) -> String {
-    format!("{}/launch.sh", process_dir(process_id))
-}
-
 fn process_stdout_path(process_id: &ProcessId) -> String {
     format!("{}/stdout.log", process_dir(process_id))
 }
@@ -963,11 +958,11 @@ fn process_expiry_at(now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     )
 }
 
-fn process_launch_script(process: &ProcessInfo) -> Result<String> {
+fn process_launch_command(process: &ProcessInfo) -> Result<String> {
     let base = process_dir(&process.id);
     let command = shell_join(&process.command);
     Ok(format!(
-        "#!/bin/sh\nset -eu\nbase={base}\nmkdir -p \"$base\"\n: > \"$base/stdout.log\"\n: > \"$base/stderr.log\"\nrm -f \"$base/exit_code\" \"$base/pid\" \"$base/cancelled\"\nnohup /bin/sh -lc {wrapped} >> \"$base/stdout.log\" 2>> \"$base/stderr.log\" </dev/null &\npid=$!\nprintf \"%s\" \"$pid\" > \"$base/pid\"\n",
+        "set -eu; base={base}; mkdir -p \"$base\"; : > \"$base/stdout.log\"; : > \"$base/stderr.log\"; rm -f \"$base/exit_code\" \"$base/pid\" \"$base/cancelled\"; nohup /bin/sh -lc {wrapped} >> \"$base/stdout.log\" 2>> \"$base/stderr.log\" </dev/null & pid=$!; printf \"%s\" \"$pid\" > \"$base/pid\"",
         base = shell_escape(&base),
         wrapped = shell_escape(&format!(
             "export PYTHONUNBUFFERED=1; {command}; code=$?; printf '%s' \"$code\" > {exit_path}; exit \"$code\"",
@@ -1296,6 +1291,39 @@ mod tests {
             .await
             .expect("read stderr");
         assert_eq!(stderr.contents, "err");
+    }
+
+    #[test]
+    fn process_launch_command_sets_up_logs_inline() {
+        let process_id = ProcessId::new();
+        let process = ProcessInfo {
+            id: process_id.clone(),
+            sandbox_id: SandboxId::new(),
+            requested_sandbox_id: None,
+            disposition: ProcessDisposition::ReusedExisting,
+            destroy_sandbox_on_expiry: false,
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf ok".to_string(),
+            ],
+            status: ProcessStatus::Starting,
+            stdout_path: process_stdout_path(&process_id),
+            stderr_path: process_stderr_path(&process_id),
+            backend_pid: None,
+            exit_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+            expires_at: None,
+        };
+
+        let launch = process_launch_command(&process).expect("build launch command");
+        assert!(launch.contains("mkdir -p"));
+        assert!(launch.contains("nohup /bin/sh -lc"));
+        assert!(launch.contains("stdout.log"));
+        assert!(launch.contains("stderr.log"));
+        assert!(launch.contains("exit_code"));
+        assert!(!launch.contains("launch.sh"));
     }
 
     #[tokio::test]
