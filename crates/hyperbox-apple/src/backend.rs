@@ -378,23 +378,6 @@ impl AppleVzBackend {
         })
     }
 
-    async fn read_file_direct(
-        &self,
-        direct: &DirectContainerSandbox,
-        path: &str,
-        _timeout_secs: u64,
-    ) -> Result<FilePayload> {
-        let relative = normalize_relative_path(path)?;
-        let host_path = path_in_host_workspace(&direct.workspace_host, &relative);
-        let bytes = tokio::fs::read(&host_path).await.map_err(|e| {
-            HyperboxError::ExecutionFailed(format!("read host workspace file `{}`: {e}", host_path.display()))
-        })?;
-        Ok(FilePayload {
-            path: path.to_string().into(),
-            bytes,
-        })
-    }
-
     async fn read_file_in_container(
         &self,
         container_name: &str,
@@ -430,31 +413,6 @@ impl AppleVzBackend {
             path: path.to_string().into(),
             bytes: result.stdout,
         })
-    }
-
-    async fn write_file_direct(
-        &self,
-        direct: &DirectContainerSandbox,
-        payload: FilePayload,
-        _timeout_secs: u64,
-    ) -> Result<()> {
-        let relative = normalize_relative_path(payload.path.as_str())?;
-        let host_path = path_in_host_workspace(&direct.workspace_host, &relative);
-        if let Some(parent) = host_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                HyperboxError::ExecutionFailed(format!(
-                    "create host workspace directory `{}`: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-        tokio::fs::write(&host_path, payload.bytes).await.map_err(|e| {
-            HyperboxError::ExecutionFailed(format!(
-                "write host workspace file `{}`: {e}",
-                host_path.display()
-            ))
-        })?;
-        Ok(())
     }
 
     async fn write_file_in_container(
@@ -919,7 +877,11 @@ impl SandboxBackend for AppleVzBackend {
 
         if let Some(direct) = direct_container {
             return self
-                .read_file_direct(&direct, path, DEFAULT_IO_TIMEOUT_SECS)
+                .read_file_in_container(
+                    &direct.container_name,
+                    path,
+                    DEFAULT_IO_TIMEOUT_SECS,
+                )
                 .await;
         }
 
@@ -998,7 +960,11 @@ impl SandboxBackend for AppleVzBackend {
 
         if let Some(direct) = direct_container {
             return self
-                .write_file_direct(&direct, payload, DEFAULT_IO_TIMEOUT_SECS)
+                .write_file_in_container(
+                    &direct.container_name,
+                    payload,
+                    DEFAULT_IO_TIMEOUT_SECS,
+                )
                 .await;
         }
 
@@ -1503,10 +1469,6 @@ fn path_in_container(relative: &Path) -> String {
         .to_string()
 }
 
-fn path_in_host_workspace(workspace_host: &Path, relative: &Path) -> PathBuf {
-    workspace_host.join(relative)
-}
-
 fn apple_allowlist_supported(
     backend_config: &AppleBackendConfig,
     direct_container_mode: bool,
@@ -1773,7 +1735,7 @@ done
     }
 
     #[tokio::test]
-    async fn direct_file_io_uses_host_workspace_without_container_exec() {
+    async fn direct_file_io_does_not_bypass_container_exec() {
         let root = unique_test_root();
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).expect("create workspace");
@@ -1789,33 +1751,43 @@ done
             runtime_kind: AppleRuntimeKind::Containerization,
             ..AppleBackendConfig::default()
         });
+        let sandbox_id = SandboxId::new();
         let direct = DirectContainerSandbox {
             container_name: "unused".to_string(),
             workspace_host: workspace.clone(),
             ephemeral_workspace: false,
         };
+        backend.sandboxes.lock().await.insert(
+            sandbox_id.clone(),
+            AppleSandbox {
+                info: SandboxInfo {
+                    id: sandbox_id.clone(),
+                    template: "python:3.12".to_string(),
+                    state: SandboxState::Ready,
+                    created_at: Utc::now(),
+                },
+                direct_container: Some(direct),
+            },
+        );
 
-        let payload = backend
-            .read_file_direct(&direct, "stdout.log", 5)
+        let read_err = backend
+            .read_file(&sandbox_id, "stdout.log")
             .await
-            .expect("read direct file from host workspace");
-        assert_eq!(payload.bytes, b"host-visible");
+            .expect_err("direct read should still require container exec");
+        assert!(!read_err.to_string().is_empty());
 
-        backend
-            .write_file_direct(
-                &direct,
+        let write_err = backend
+            .write_file(
+                &sandbox_id,
                 FilePayload {
                     path: "nested/output.txt".into(),
                     bytes: b"written-via-host".to_vec(),
                 },
-                5,
             )
             .await
-            .expect("write direct file to host workspace");
-        assert_eq!(
-            fs::read(workspace.join("nested/output.txt")).expect("read written file"),
-            b"written-via-host"
-        );
+            .expect_err("direct write should still require container exec");
+        assert!(!write_err.to_string().is_empty());
+        assert!(!workspace.join("nested/output.txt").exists());
 
         let _ = fs::remove_dir_all(&root);
     }
