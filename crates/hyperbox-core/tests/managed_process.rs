@@ -8,6 +8,7 @@ fn running_process_is_not_terminal() {
         sandbox_id: SandboxId::new(),
         requested_sandbox_id: None,
         disposition: ProcessDisposition::CreatedNew,
+        destroy_sandbox_on_expiry: false,
         command: vec!["python".to_string(), "train.py".to_string()],
         status: ProcessStatus::Running,
         stdout_path: ".hyperbox/processes/stdout.log".to_string(),

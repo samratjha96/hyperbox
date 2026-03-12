@@ -67,6 +67,7 @@ fn into_proto_process(process: ProcessInfo) -> pb::ProcessInfo {
             .map(|id| id.0.to_string())
             .unwrap_or_default(),
         disposition: format!("{:?}", process.disposition),
+        destroy_sandbox_on_expiry: process.destroy_sandbox_on_expiry,
         command: process.command,
         status: format!("{:?}", process.status),
         stdout_path: process.stdout_path,
@@ -218,6 +219,7 @@ impl HyperboxControl for GrpcControlService {
                 request.command,
                 requested_sandbox_id,
                 disposition,
+                request.destroy_sandbox_on_expiry,
             )
             .await
             .map_err(|e| {

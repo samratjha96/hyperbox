@@ -1678,6 +1678,7 @@ async fn run_remote_with_client(
             &sandbox.id,
             None,
             ProcessDisposition::CreatedNew,
+            detach,
             &cmd,
         )
         .await?;
@@ -1760,11 +1761,13 @@ async fn run_existing_with_client(
 
     run_ensure_commands_with_client(client, &sandbox_id, &ensure_commands, timeout).await?;
 
+    let destroy_sandbox_on_expiry = prepared.disposition == ProcessDisposition::CreatedDueToBusy;
     let process = start_shell_command_with_client(
         client,
         &sandbox_id,
         prepared.requested_sandbox_id.clone(),
         prepared.disposition,
+        destroy_sandbox_on_expiry,
         &cmd,
     )
     .await?;
@@ -1843,6 +1846,7 @@ async fn start_shell_command_with_client(
     sandbox_id: &SandboxId,
     requested_sandbox_id: Option<SandboxId>,
     disposition: ProcessDisposition,
+    destroy_sandbox_on_expiry: bool,
     cmd: &str,
 ) -> anyhow::Result<ProcessInfo> {
     client
@@ -1851,6 +1855,7 @@ async fn start_shell_command_with_client(
             vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.to_string()],
             requested_sandbox_id,
             disposition,
+            destroy_sandbox_on_expiry,
         )
         .await
 }

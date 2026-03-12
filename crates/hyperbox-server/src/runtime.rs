@@ -147,6 +147,7 @@ impl HyperboxServer {
         command: Vec<String>,
         requested_sandbox_id: Option<SandboxId>,
         disposition: ProcessDisposition,
+        destroy_sandbox_on_expiry: bool,
     ) -> Result<ProcessInfo> {
         self.ensure_hydrated().await?;
         self.cleanup_expired_processes().await?;
@@ -169,6 +170,7 @@ impl HyperboxServer {
             sandbox_id: sandbox_id.clone(),
             requested_sandbox_id,
             disposition,
+            destroy_sandbox_on_expiry,
             command: command.clone(),
             status: ProcessStatus::Starting,
             stdout_path: process_stdout_path(&process_id),
@@ -722,21 +724,48 @@ impl HyperboxServer {
     }
 
     async fn purge_process(&self, process: &ProcessInfo) -> Result<()> {
-        if self.backend.inspect(&process.sandbox_id).await.is_ok() {
-            let _ = self
-                .backend
-                .exec(
-                    &process.sandbox_id,
-                    ExecRequest {
-                        command: vec![
-                            "/bin/sh".to_string(),
-                            "-lc".to_string(),
-                            format!("rm -rf {}", shell_escape(process_dir(&process.id).as_str())),
-                        ],
-                        timeout_secs: 5,
-                    },
-                )
-                .await;
+        match self.backend.inspect(&process.sandbox_id).await {
+            Ok(_) if process.destroy_sandbox_on_expiry => {
+                self.backend.destroy(&process.sandbox_id).await?;
+                self.sandboxes.lock().await.remove(&process.sandbox_id);
+                self.snapshots
+                    .clear_sandbox_binding(&process.sandbox_id)
+                    .await?;
+                self.snapshots
+                    .remove_active_sandbox(&process.sandbox_id)
+                    .await?;
+            }
+            Ok(_) => {
+                let _ = self
+                    .backend
+                    .exec(
+                        &process.sandbox_id,
+                        ExecRequest {
+                            command: vec![
+                                "/bin/sh".to_string(),
+                                "-lc".to_string(),
+                                format!(
+                                    "rm -rf {}",
+                                    shell_escape(process_dir(&process.id).as_str())
+                                ),
+                            ],
+                            timeout_secs: 5,
+                        },
+                    )
+                    .await;
+            }
+            Err(HyperboxError::SandboxNotFound(_)) => {
+                if process.destroy_sandbox_on_expiry {
+                    self.sandboxes.lock().await.remove(&process.sandbox_id);
+                    self.snapshots
+                        .clear_sandbox_binding(&process.sandbox_id)
+                        .await?;
+                    self.snapshots
+                        .remove_active_sandbox(&process.sandbox_id)
+                        .await?;
+                }
+            }
+            Err(err) => return Err(err),
         }
         self.snapshots.remove_process(&process.id).await
     }
@@ -851,6 +880,13 @@ fn parse_process_probe(process: &ProcessInfo, probe: &str) -> Result<ProcessInfo
         return Ok(updated);
     }
     if probe == "lost" {
+        if (now - updated.started_at) < ChronoDuration::seconds(1) {
+            updated.status = ProcessStatus::Starting;
+            updated.exit_code = None;
+            updated.finished_at = None;
+            updated.expires_at = None;
+            return Ok(updated);
+        }
         updated.status = ProcessStatus::Lost;
         updated.finished_at.get_or_insert(now);
         updated.expires_at.get_or_insert(process_expiry_at(now));
@@ -1009,6 +1045,7 @@ mod tests {
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
+                false,
             )
             .await
             .expect("start process");
@@ -1056,6 +1093,7 @@ mod tests {
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
+                false,
             )
             .await
             .expect("start process");
@@ -1101,6 +1139,7 @@ mod tests {
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
+                false,
             )
             .await
             .expect("start first process");
@@ -1116,6 +1155,7 @@ mod tests {
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
+                false,
             )
             .await
             .expect_err("second process should be rejected");
@@ -1147,6 +1187,7 @@ mod tests {
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
+                false,
             )
             .await
             .expect("start process");
@@ -1184,6 +1225,7 @@ mod tests {
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
+                false,
             )
             .await
             .expect("start first process");
@@ -1196,5 +1238,115 @@ mod tests {
         assert_eq!(prepared.disposition, ProcessDisposition::CreatedDueToBusy);
         assert_eq!(prepared.requested_sandbox_id, Some(sandbox.id.clone()));
         assert_ne!(prepared.info.id, sandbox.id);
+    }
+
+    #[tokio::test]
+    async fn expired_process_reclaims_owned_sandbox() {
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-expiry-owned-test",
+        ))));
+        let server = HyperboxServer::new(backend);
+
+        let sandbox = server
+            .create_sandbox(SandboxConfig::default())
+            .await
+            .expect("create sandbox");
+
+        let process = server
+            .start_process(
+                &sandbox.id,
+                vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "printf owned-cleanup".to_string(),
+                ],
+                None,
+                ProcessDisposition::CreatedNew,
+                true,
+            )
+            .await
+            .expect("start process");
+
+        let completed = server
+            .wait_process(&process.id, 5)
+            .await
+            .expect("wait process");
+        assert_eq!(completed.status, ProcessStatus::Succeeded);
+
+        let mut expired = completed.clone();
+        expired.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        server
+            .snapshots
+            .upsert_process(&expired)
+            .await
+            .expect("expire process");
+
+        assert!(
+            server
+                .list_processes()
+                .await
+                .expect("list processes")
+                .is_empty()
+        );
+        let inspect_err = server
+            .inspect(&sandbox.id)
+            .await
+            .expect_err("owned sandbox should be reclaimed");
+        assert!(matches!(inspect_err, HyperboxError::SandboxNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn expired_process_keeps_unowned_sandbox() {
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-expiry-unowned-test",
+        ))));
+        let server = HyperboxServer::new(backend);
+
+        let sandbox = server
+            .create_sandbox(SandboxConfig::default())
+            .await
+            .expect("create sandbox");
+
+        let process = server
+            .start_process(
+                &sandbox.id,
+                vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "printf keep-sandbox".to_string(),
+                ],
+                None,
+                ProcessDisposition::ReusedExisting,
+                false,
+            )
+            .await
+            .expect("start process");
+
+        let completed = server
+            .wait_process(&process.id, 5)
+            .await
+            .expect("wait process");
+        assert_eq!(completed.status, ProcessStatus::Succeeded);
+
+        let mut expired = completed.clone();
+        expired.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        server
+            .snapshots
+            .upsert_process(&expired)
+            .await
+            .expect("expire process");
+
+        assert!(
+            server
+                .list_processes()
+                .await
+                .expect("list processes")
+                .is_empty()
+        );
+        let inspected = server
+            .inspect(&sandbox.id)
+            .await
+            .expect("sandbox should remain");
+        assert_eq!(inspected.id, sandbox.id);
     }
 }

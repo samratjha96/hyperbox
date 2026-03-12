@@ -87,6 +87,7 @@ pub struct ProcessInfo {
     pub sandbox_id: SandboxId,
     pub requested_sandbox_id: Option<SandboxId>,
     pub disposition: ProcessDisposition,
+    pub destroy_sandbox_on_expiry: bool,
     pub command: Vec<String>,
     pub status: ProcessStatus,
     pub stdout_path: String,

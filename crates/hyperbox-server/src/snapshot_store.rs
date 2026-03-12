@@ -220,6 +220,7 @@ impl SqliteSnapshotStore {
               sandbox_id TEXT NOT NULL,
               requested_sandbox_id TEXT,
               disposition TEXT NOT NULL,
+              destroy_sandbox_on_expiry INTEGER NOT NULL DEFAULT 0,
               command_json TEXT NOT NULL,
               status TEXT NOT NULL,
               stdout_path TEXT NOT NULL,
@@ -238,6 +239,10 @@ impl SqliteSnapshotStore {
             ",
         )
         .map_err(sql_err)?;
+        let _ = conn.execute(
+            "ALTER TABLE processes ADD COLUMN destroy_sandbox_on_expiry INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(())
     }
 
@@ -492,14 +497,15 @@ impl SnapshotStore for SqliteSnapshotStore {
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO processes (
-                   process_id, sandbox_id, requested_sandbox_id, disposition, command_json,
+                   process_id, sandbox_id, requested_sandbox_id, disposition, destroy_sandbox_on_expiry, command_json,
                    status, stdout_path, stderr_path, backend_pid, exit_code, started_at,
                    finished_at, expires_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(process_id) DO UPDATE SET
                    sandbox_id = excluded.sandbox_id,
                    requested_sandbox_id = excluded.requested_sandbox_id,
                    disposition = excluded.disposition,
+                   destroy_sandbox_on_expiry = excluded.destroy_sandbox_on_expiry,
                    command_json = excluded.command_json,
                    status = excluded.status,
                    stdout_path = excluded.stdout_path,
@@ -517,6 +523,7 @@ impl SnapshotStore for SqliteSnapshotStore {
                         .as_ref()
                         .map(|id| id.0.to_string()),
                     serde_json::to_string(&process.disposition)?,
+                    process.destroy_sandbox_on_expiry,
                     serde_json::to_string(&process.command)?,
                     serde_json::to_string(&process.status)?,
                     process.stdout_path,
@@ -536,7 +543,7 @@ impl SnapshotStore for SqliteSnapshotStore {
     async fn get_process(&self, process_id: &ProcessId) -> Result<Option<ProcessInfo>> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT process_id, sandbox_id, requested_sandbox_id, disposition, command_json,
+                "SELECT process_id, sandbox_id, requested_sandbox_id, disposition, destroy_sandbox_on_expiry, command_json,
                         status, stdout_path, stderr_path, backend_pid, exit_code, started_at,
                         finished_at, expires_at
                  FROM processes
@@ -553,7 +560,7 @@ impl SnapshotStore for SqliteSnapshotStore {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT process_id, sandbox_id, requested_sandbox_id, disposition, command_json,
+                    "SELECT process_id, sandbox_id, requested_sandbox_id, disposition, destroy_sandbox_on_expiry, command_json,
                             status, stdout_path, stderr_path, backend_pid, exit_code, started_at,
                             finished_at, expires_at
                      FROM processes
@@ -583,15 +590,16 @@ fn process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessInfo> {
     let sandbox_id: String = row.get(1)?;
     let requested_sandbox_id: Option<String> = row.get(2)?;
     let disposition_json: String = row.get(3)?;
-    let command_json: String = row.get(4)?;
-    let status_json: String = row.get(5)?;
-    let stdout_path: String = row.get(6)?;
-    let stderr_path: String = row.get(7)?;
-    let backend_pid: Option<u32> = row.get(8)?;
-    let exit_code: Option<i32> = row.get(9)?;
-    let started_at: String = row.get(10)?;
-    let finished_at: Option<String> = row.get(11)?;
-    let expires_at: Option<String> = row.get(12)?;
+    let destroy_sandbox_on_expiry = row.get::<_, i64>(4)? != 0;
+    let command_json: String = row.get(5)?;
+    let status_json: String = row.get(6)?;
+    let stdout_path: String = row.get(7)?;
+    let stderr_path: String = row.get(8)?;
+    let backend_pid: Option<u32> = row.get(9)?;
+    let exit_code: Option<i32> = row.get(10)?;
+    let started_at: String = row.get(11)?;
+    let finished_at: Option<String> = row.get(12)?;
+    let expires_at: Option<String> = row.get(13)?;
 
     Ok(ProcessInfo {
         id: ProcessId(parse_uuid(&process_id)?),
@@ -602,6 +610,7 @@ fn process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessInfo> {
             .transpose()?
             .map(SandboxId),
         disposition: serde_json::from_str(&disposition_json).map_err(to_sql_error)?,
+        destroy_sandbox_on_expiry,
         command: serde_json::from_str(&command_json).map_err(to_sql_error)?,
         status: serde_json::from_str(&status_json).map_err(to_sql_error)?,
         stdout_path,
@@ -761,6 +770,7 @@ mod tests {
             started_at: Utc::now(),
             finished_at: None,
             expires_at: None,
+            destroy_sandbox_on_expiry: true,
         };
 
         store.upsert_process(&record).await.expect("upsert process");
@@ -772,6 +782,7 @@ mod tests {
             .expect("process exists");
         assert_eq!(found.sandbox_id, record.sandbox_id);
         assert_eq!(found.status, ProcessStatus::Running);
+        assert!(found.destroy_sandbox_on_expiry);
 
         let listed = store.list_processes().await.expect("list processes");
         assert_eq!(listed.len(), 1);

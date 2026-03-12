@@ -171,17 +171,18 @@ message ProcessInfo {
   string sandbox_id = 2;
   string requested_sandbox_id = 3;
   string disposition = 4;
-  repeated string command = 5;
-  string status = 6;
-  string stdout_path = 7;
-  string stderr_path = 8;
-  uint32 backend_pid = 9;
-  bool has_backend_pid = 10;
-  int32 exit_code = 11;
-  bool has_exit_code = 12;
-  string started_at = 13;
-  string finished_at = 14;
-  string expires_at = 15;
+  bool destroy_sandbox_on_expiry = 5;
+  repeated string command = 6;
+  string status = 7;
+  string stdout_path = 8;
+  string stderr_path = 9;
+  uint32 backend_pid = 10;
+  bool has_backend_pid = 11;
+  int32 exit_code = 12;
+  bool has_exit_code = 13;
+  string started_at = 14;
+  string finished_at = 15;
+  string expires_at = 16;
 }
 
 message PrepareRunSandboxRequest {
@@ -200,6 +201,7 @@ message StartProcessRequest {
   repeated string command = 2;
   string requested_sandbox_id = 3;
   string disposition = 4;
+  bool destroy_sandbox_on_expiry = 5;
 }
 
 message StartProcessResponse {

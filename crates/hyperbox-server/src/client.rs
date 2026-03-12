@@ -94,6 +94,7 @@ fn parse_process_info(info: pb::ProcessInfo) -> anyhow::Result<ProcessInfo> {
             "CreatedDueToBusy" => ProcessDisposition::CreatedDueToBusy,
             _ => ProcessDisposition::ReusedExisting,
         },
+        destroy_sandbox_on_expiry: info.destroy_sandbox_on_expiry,
         command: info.command,
         status: match info.status.as_str() {
             "Starting" => ProcessStatus::Starting,
@@ -239,6 +240,7 @@ impl GrpcControlClient {
         command: Vec<String>,
         requested_sandbox_id: Option<hyperbox_core::SandboxId>,
         disposition: ProcessDisposition,
+        destroy_sandbox_on_expiry: bool,
     ) -> anyhow::Result<ProcessInfo> {
         let response = self
             .inner
@@ -249,6 +251,7 @@ impl GrpcControlClient {
                     .map(|id| id.0.to_string())
                     .unwrap_or_default(),
                 disposition: format!("{:?}", disposition),
+                destroy_sandbox_on_expiry,
             })
             .await?
             .into_inner();

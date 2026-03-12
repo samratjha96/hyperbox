@@ -106,6 +106,7 @@ async fn grpc_managed_process_lifecycle() {
             ],
             None,
             ProcessDisposition::ReusedExisting,
+            false,
         )
         .await
         .expect("start process");
@@ -177,6 +178,7 @@ async fn grpc_prepare_run_sandbox_overflows_when_busy() {
             ],
             None,
             ProcessDisposition::ReusedExisting,
+            false,
         )
         .await
         .expect("start first process");
