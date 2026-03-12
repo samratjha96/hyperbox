@@ -1,22 +1,33 @@
 use std::{
     net::TcpListener,
+    path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
     time::Duration,
 };
 
+use uuid::Uuid;
+
 fn hyperbox_bin() -> &'static str {
     env!("CARGO_BIN_EXE_hyperbox")
+}
+
+fn unique_test_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("hyperbox-cli-{name}-{}", Uuid::new_v4()))
 }
 
 fn spawn_server() -> Option<(Child, String)> {
     let listener = TcpListener::bind("127.0.0.1:0").ok()?;
     let addr = listener.local_addr().ok()?;
     drop(listener);
+    let state_db = unique_test_path("state.db");
+    let snapshot_root = unique_test_path("snapshots");
 
     let mut server = Command::new(hyperbox_bin())
         .args(["serve", "--addr", &addr.to_string()])
         .env("HYPERBOX_BACKEND", "local")
+        .env("HYPERBOX_STATE_DB", &state_db)
+        .env("HYPERBOX_SNAPSHOT_ROOT", &snapshot_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

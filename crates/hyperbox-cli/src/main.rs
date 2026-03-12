@@ -524,10 +524,6 @@ async fn main() -> anyhow::Result<()> {
             ephemeral,
             detach,
         } => {
-            let run_server_scope = cli
-                .server_url
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string());
             let autostart_default = cli.server_url.is_none();
             let mut client = connect_client(cli.server_url, autostart_default).await?;
             let server_info = load_server_info_best_effort(&mut client).await;
@@ -554,10 +550,6 @@ async fn main() -> anyhow::Result<()> {
 
             if let Some(sandbox_id) = sandbox_id {
                 let parsed_sandbox_id = parse_sandbox_id(&sandbox_id)?;
-                let details = client.inspect_sandbox_details(&parsed_sandbox_id).await?;
-                let prepared = client
-                    .prepare_run_sandbox(&parsed_sandbox_id, Some(details.config))
-                    .await?;
                 let summary = build_effective_isolation_summary(
                     server_info.as_ref(),
                     None,
@@ -568,7 +560,10 @@ async fn main() -> anyhow::Result<()> {
                 print_effective_isolation_summary(&summary, explain_details.as_ref())?;
                 run_existing_with_client(
                     &mut client,
-                    prepared,
+                    Some(parsed_sandbox_id),
+                    None,
+                    None,
+                    false,
                     ensure,
                     cmd,
                     timeout,
@@ -576,6 +571,7 @@ async fn main() -> anyhow::Result<()> {
                     reads,
                     json,
                     detach,
+                    false,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -583,17 +579,6 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             if let Some(name) = name {
-                let (info, restored) = client.resolve_affinity(&name, true).await?;
-                info!(
-                    affinity = %name,
-                    sandbox_id = %info.id.0,
-                    restored,
-                    "resolved affinity for run command"
-                );
-                let details = client.inspect_sandbox_details(&info.id).await?;
-                let prepared = client
-                    .prepare_run_sandbox(&info.id, Some(details.config))
-                    .await?;
                 let summary = build_effective_isolation_summary(
                     server_info.as_ref(),
                     None,
@@ -604,7 +589,10 @@ async fn main() -> anyhow::Result<()> {
                 print_effective_isolation_summary(&summary, explain_details.as_ref())?;
                 run_existing_with_client(
                     &mut client,
-                    prepared,
+                    None,
+                    Some(name),
+                    None,
+                    false,
                     ensure,
                     cmd,
                     timeout,
@@ -612,6 +600,7 @@ async fn main() -> anyhow::Result<()> {
                     reads,
                     json,
                     detach,
+                    false,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -619,7 +608,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let mut config = SandboxConfig {
+            let config = SandboxConfig {
                 template,
                 network: resolved_policy.network_mode,
                 timeout_secs: timeout,
@@ -637,9 +626,12 @@ async fn main() -> anyhow::Result<()> {
             ensure_network_mode_supported(server_info.as_ref(), &config.network)?;
 
             if ephemeral {
-                run_remote_with_client(
+                run_existing_with_client(
                     &mut client,
-                    config,
+                    None,
+                    None,
+                    Some(config),
+                    false,
                     ensure,
                     cmd,
                     timeout,
@@ -647,34 +639,18 @@ async fn main() -> anyhow::Result<()> {
                     reads,
                     json,
                     detach,
+                    !detach,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
                 .await?;
             } else {
-                config.affinity_name = Some(derive_auto_run_affinity_name(
-                    &run_server_scope,
-                    &config.template,
-                    config.workspace_dir.as_deref(),
-                    &config.network,
-                ));
-                let (session_id, created_new, session_name) =
-                    ensure_or_create_affinity_session_with_client(&mut client, config).await?;
-                if created_new {
-                    eprintln!(
-                        "session: started `{session_name}` (reused automatically on next `run`; use --ephemeral for one-off)"
-                    );
-                } else {
-                    eprintln!("session: reusing `{session_name}` (use --ephemeral for one-off)");
-                }
-                let mut overflow_config = client.inspect_sandbox_details(&session_id).await?.config;
-                overflow_config.affinity_name = None;
-                let prepared = client
-                    .prepare_run_sandbox(&session_id, Some(overflow_config))
-                    .await?;
                 run_existing_with_client(
                     &mut client,
-                    prepared,
+                    None,
+                    None,
+                    Some(config),
+                    true,
                     ensure,
                     cmd,
                     timeout,
@@ -682,6 +658,7 @@ async fn main() -> anyhow::Result<()> {
                     reads,
                     json,
                     detach,
+                    false,
                     Some(&summary),
                     explain_details.as_ref(),
                 )
@@ -1325,109 +1302,6 @@ fn ensure_network_mode_supported(
     Ok(())
 }
 
-async fn ensure_or_create_affinity_session_with_client(
-    client: &mut GrpcControlClient,
-    config: SandboxConfig,
-) -> anyhow::Result<(SandboxId, bool, String)> {
-    let affinity_name = config
-        .affinity_name
-        .clone()
-        .context("affinity name is required for session reuse")?;
-    let create_config = config.clone();
-    match client.resolve_affinity(&affinity_name, false).await {
-        Ok((info, restored)) => {
-            info!(
-                affinity = %affinity_name,
-                sandbox_id = %info.id.0,
-                restored,
-                "reused affinity sandbox for run command"
-            );
-            Ok((info.id, false, affinity_name))
-        }
-        Err(err) if is_affinity_absent_error(&err) => {
-            let info = client.create_sandbox(create_config).await?;
-            info!(
-                affinity = %affinity_name,
-                sandbox_id = %info.id.0,
-                "created affinity sandbox for run command"
-            );
-            Ok((info.id, true, affinity_name))
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn is_affinity_absent_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("affinity not found") || message.contains("has no active sandbox")
-}
-
-fn derive_auto_run_affinity_name(
-    server_scope: &str,
-    template: &str,
-    workspace_dir: Option<&str>,
-    network: &NetworkMode,
-) -> String {
-    let scope = match workspace_dir {
-        Some(dir) => std::fs::canonicalize(dir)
-            .ok()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| dir.to_string()),
-        None => std::env::current_dir()
-            .ok()
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "<unknown-cwd>".to_string()),
-    };
-    let network_key = match network {
-        NetworkMode::None => "none".to_string(),
-        NetworkMode::Full => "full".to_string(),
-        NetworkMode::Allowlist(domains) => {
-            let mut normalized: Vec<String> =
-                domains.iter().map(|d| d.to_ascii_lowercase()).collect();
-            normalized.sort();
-            format!("allowlist:{}", normalized.join(","))
-        }
-    };
-    let material =
-        format!("server={server_scope}|template={template}|scope={scope}|network={network_key}");
-    let hash = fnv1a64(material.as_bytes());
-    let template_slug = sanitize_affinity_component(template, 18);
-    format!("auto-{template_slug}-{hash:016x}")
-}
-
-fn sanitize_affinity_component(raw: &str, max_len: usize) -> String {
-    let mut value = String::with_capacity(raw.len().min(max_len));
-    for ch in raw.chars() {
-        if value.len() >= max_len {
-            break;
-        }
-        if ch.is_ascii_alphanumeric() {
-            value.push(ch.to_ascii_lowercase());
-        } else {
-            value.push('-');
-        }
-    }
-    let trimmed = value.trim_matches('-');
-    if trimmed.is_empty() {
-        "run".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn fnv1a64(input: &[u8]) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    let mut hash = OFFSET_BASIS;
-    for byte in input {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
-}
-
 #[derive(Debug, Deserialize)]
 struct ProfileConfigFile {
     profiles: std::collections::HashMap<String, ProfileDefinition>,
@@ -1638,9 +1512,12 @@ fn print_effective_isolation_summary(
     Ok(())
 }
 
-async fn run_remote_with_client(
+async fn run_existing_with_client(
     client: &mut GrpcControlClient,
-    config: SandboxConfig,
+    sandbox_id: Option<SandboxId>,
+    affinity_name: Option<String>,
+    create_config: Option<SandboxConfig>,
+    reuse_auto_session: bool,
     ensure_commands: Vec<String>,
     cmd: String,
     timeout: u64,
@@ -1648,187 +1525,66 @@ async fn run_remote_with_client(
     reads: Vec<String>,
     json: bool,
     detach: bool,
+    destroy_after_wait: bool,
     effective_isolation: Option<&EffectiveIsolationSummary>,
     explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<()> {
-    let op_started = Instant::now();
-    let create_started = Instant::now();
-    let sandbox = client.create_sandbox(config).await?;
-    let skip_destroy = detach;
-    info!(
-        sandbox_id = %sandbox.id.0,
-        stage = "create",
-        elapsed_ms = create_started.elapsed().as_millis() as u64,
-        "run command sandbox created"
-    );
-
-    let run_result: anyhow::Result<i32> = async {
-        for entry in writes {
+    let writes = writes
+        .into_iter()
+        .map(|entry| {
             let (path, content) = entry
                 .split_once('=')
                 .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
-            client
-                .write_file(&sandbox.id, path.to_string(), content.as_bytes().to_vec())
-                .await?;
-        }
+            Ok((path.to_string(), content.as_bytes().to_vec()))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-        run_ensure_commands_with_client(client, &sandbox.id, &ensure_commands, timeout).await?;
-
-        let process = start_shell_command_with_client(
-            client,
-            &sandbox.id,
-            None,
-            ProcessDisposition::CreatedNew,
+    let started = client
+        .start_run(
+            sandbox_id,
+            affinity_name,
+            create_config,
+            reuse_auto_session,
+            ensure_commands,
+            writes,
+            cmd,
             detach,
-            &cmd,
         )
         .await?;
-        if detach {
-            emit_process_start(&process, json, effective_isolation, explain)?;
-            return Ok(0);
-        }
-        let outcome = wait_for_process_outcome(client, &process.id, timeout, json).await?;
-
-        let mut artifacts = Vec::new();
-        for path in reads {
-            let bytes = client.read_file(&sandbox.id, path.clone()).await?;
-            artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
-        }
-
-        emit_result(
-            outcome,
-            artifacts,
-            json,
-            !json,
-            effective_isolation,
-            explain,
-        )
-    }
-    .await;
-
-    if !skip_destroy {
-        let destroy_started = Instant::now();
-        let destroy_result = client.destroy_sandbox(&sandbox.id).await;
-        if let Err(err) = destroy_result {
-            warn!(
-                sandbox_id = %sandbox.id.0,
-                stage = "destroy",
-                elapsed_ms = destroy_started.elapsed().as_millis() as u64,
-                error = %err,
-                "run command sandbox destroy failed"
-            );
-            if run_result.is_ok() {
-                return Err(err);
-            }
-        }
-        info!(
-            sandbox_id = %sandbox.id.0,
-            stage = "destroy",
-            elapsed_ms = destroy_started.elapsed().as_millis() as u64,
-            total_elapsed_ms = op_started.elapsed().as_millis() as u64,
-            "run command sandbox destroyed"
-        );
-    }
-
-    let exit_code = run_result?;
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-async fn run_existing_with_client(
-    client: &mut GrpcControlClient,
-    prepared: hyperbox_server::PreparedRunSandbox,
-    ensure_commands: Vec<String>,
-    cmd: String,
-    timeout: u64,
-    writes: Vec<String>,
-    reads: Vec<String>,
-    json: bool,
-    detach: bool,
-    effective_isolation: Option<&EffectiveIsolationSummary>,
-    explain: Option<&ExplainDetails>,
-) -> anyhow::Result<()> {
-    let sandbox_id = prepared.info.id.clone();
-    for entry in writes {
-        let (path, content) = entry
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid --write value, expected PATH=CONTENT"))?;
-        client
-            .write_file(&sandbox_id, path.to_string(), content.as_bytes().to_vec())
-            .await?;
-    }
-
-    run_ensure_commands_with_client(client, &sandbox_id, &ensure_commands, timeout).await?;
-
-    let destroy_sandbox_on_expiry = prepared.disposition == ProcessDisposition::CreatedDueToBusy;
-    let process = start_shell_command_with_client(
-        client,
-        &sandbox_id,
-        prepared.requested_sandbox_id.clone(),
-        prepared.disposition,
-        destroy_sandbox_on_expiry,
-        &cmd,
-    )
-    .await?;
-    maybe_print_overflow_notice(&process);
+    maybe_print_session_notice(&started);
+    maybe_print_overflow_notice(&started.process);
     if detach {
-        emit_process_start(&process, json, effective_isolation, explain)?;
+        emit_process_start(&started.process, json, effective_isolation, explain)?;
         return Ok(());
     }
-    let outcome = wait_for_process_outcome(client, &process.id, timeout, json).await?;
+    let outcome = wait_for_process_outcome(client, &started.process.id, timeout, json).await?;
 
     let mut artifacts = Vec::new();
     for path in reads {
-        let bytes = client.read_file(&sandbox_id, path.clone()).await?;
+        let bytes = client.read_file(&started.sandbox.id, path.clone()).await?;
         artifacts.push((path, String::from_utf8_lossy(&bytes).to_string()));
     }
 
-    let exit_code = emit_result(
+    let run_result = emit_result(
         outcome,
         artifacts,
         json,
         !json,
         effective_isolation,
         explain,
-    )?;
+    );
+    if destroy_after_wait {
+        let destroy_result = client.destroy_sandbox(&started.sandbox.id).await;
+        if let Err(err) = destroy_result {
+            if run_result.is_ok() {
+                return Err(err);
+            }
+        }
+    }
+
+    let exit_code = run_result?;
     if exit_code != 0 {
         std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-async fn run_ensure_commands_with_client(
-    client: &mut GrpcControlClient,
-    sandbox_id: &SandboxId,
-    ensure_commands: &[String],
-    timeout_secs: u64,
-) -> anyhow::Result<()> {
-    for ensure in ensure_commands {
-        let marker = format!(".hyperbox/ensure/{:016x}.done", fnv1a64(ensure.as_bytes()));
-        let script = format!(
-            "set -e\nmkdir -p .hyperbox/ensure\nif [ ! -f \"{marker}\" ]; then\n{ensure}\ntouch \"{marker}\"\nfi"
-        );
-        let outcome = client
-            .exec(
-                sandbox_id,
-                ExecRequest {
-                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), script],
-                    timeout_secs,
-                },
-            )
-            .await?;
-        if outcome.exit_code != 0 {
-            let stderr = outcome.stderr.trim();
-            if stderr.is_empty() {
-                bail!("--ensure step failed with exit code {}", outcome.exit_code);
-            }
-            bail!(
-                "--ensure step failed with exit code {}: {stderr}",
-                outcome.exit_code
-            );
-        }
     }
     Ok(())
 }
@@ -1842,23 +1598,16 @@ fn maybe_print_overflow_notice(process: &ProcessInfo) {
     }
 }
 
-async fn start_shell_command_with_client(
-    client: &mut GrpcControlClient,
-    sandbox_id: &SandboxId,
-    requested_sandbox_id: Option<SandboxId>,
-    disposition: ProcessDisposition,
-    destroy_sandbox_on_expiry: bool,
-    cmd: &str,
-) -> anyhow::Result<ProcessInfo> {
-    client
-        .start_process(
-            sandbox_id,
-            vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.to_string()],
-            requested_sandbox_id,
-            disposition,
-            destroy_sandbox_on_expiry,
-        )
-        .await
+fn maybe_print_session_notice(started: &hyperbox_server::StartedRun) {
+    if let Some(session_name) = started.session_name.as_deref() {
+        if started.session_created {
+            eprintln!(
+                "session: started `{session_name}` (reused automatically on next `run`; use --ephemeral for one-off)"
+            );
+        } else {
+            eprintln!("session: reusing `{session_name}` (use --ephemeral for one-off)");
+        }
+    }
 }
 
 #[derive(Default)]
@@ -3173,9 +2922,9 @@ mod tests {
     use std::fs;
 
     use super::{
-        NetworkArg, derive_auto_run_affinity_name, extract_container_bin_from_helper_argv,
-        helper_argv_is_builtin_apple_helper, is_affinity_absent_error, network_enforcement_status,
-        resolve_network_policy, writable_scope_from_workspace_and_writes,
+        NetworkArg, extract_container_bin_from_helper_argv, helper_argv_is_builtin_apple_helper,
+        network_enforcement_status, resolve_network_policy,
+        writable_scope_from_workspace_and_writes,
     };
     use hyperbox_core::NetworkMode;
     use hyperbox_server::ServerInfo;
@@ -3407,52 +3156,5 @@ allow = ["github.com", "pypi.org"]
         assert_eq!(resolved.profile_label.as_deref(), Some("team_web"));
 
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn derive_auto_run_affinity_name_is_stable_for_same_inputs() {
-        let first = derive_auto_run_affinity_name(
-            "http://127.0.0.1:50051",
-            "python:3.12",
-            Some("/tmp/project"),
-            &NetworkMode::Allowlist(vec!["example.com".to_string(), "github.com".to_string()]),
-        );
-        let second = derive_auto_run_affinity_name(
-            "http://127.0.0.1:50051",
-            "python:3.12",
-            Some("/tmp/project"),
-            &NetworkMode::Allowlist(vec!["github.com".to_string(), "example.com".to_string()]),
-        );
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn derive_auto_run_affinity_name_changes_with_network() {
-        let none = derive_auto_run_affinity_name(
-            "http://127.0.0.1:50051",
-            "python:3.12",
-            Some("/tmp/project"),
-            &NetworkMode::None,
-        );
-        let full = derive_auto_run_affinity_name(
-            "http://127.0.0.1:50051",
-            "python:3.12",
-            Some("/tmp/project"),
-            &NetworkMode::Full,
-        );
-        assert_ne!(none, full);
-    }
-
-    #[test]
-    fn affinity_absent_error_matcher_detects_expected_messages() {
-        let missing = anyhow::anyhow!("status: Internal, message: \"affinity not found: auto\"");
-        assert!(is_affinity_absent_error(&missing));
-
-        let inactive =
-            anyhow::anyhow!("status: Internal, message: \"affinity `auto` has no active sandbox\"");
-        assert!(is_affinity_absent_error(&inactive));
-
-        let unrelated = anyhow::anyhow!("status: Internal, message: \"permission denied\"");
-        assert!(!is_affinity_absent_error(&unrelated));
     }
 }

@@ -42,6 +42,14 @@ pub struct PreparedRunSandbox {
     pub disposition: ProcessDisposition,
 }
 
+#[derive(Debug, Clone)]
+pub struct StartedRun {
+    pub process: ProcessInfo,
+    pub sandbox: SandboxInfo,
+    pub session_name: Option<String>,
+    pub session_created: bool,
+}
+
 fn parse_sandbox_info(info: pb::SandboxInfo) -> anyhow::Result<SandboxInfo> {
     Ok(SandboxInfo {
         id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
@@ -260,6 +268,54 @@ impl GrpcControlClient {
                 .process
                 .ok_or_else(|| anyhow::anyhow!("missing process info"))?,
         )
+    }
+
+    pub async fn start_run(
+        &mut self,
+        sandbox_id: Option<hyperbox_core::SandboxId>,
+        affinity_name: Option<String>,
+        create_config: Option<SandboxConfig>,
+        reuse_auto_session: bool,
+        ensure_commands: Vec<String>,
+        writes: Vec<(String, Vec<u8>)>,
+        command: String,
+        destroy_sandbox_on_expiry: bool,
+    ) -> anyhow::Result<StartedRun> {
+        let response = self
+            .inner
+            .start_run(pb::StartRunRequest {
+                sandbox_id: sandbox_id.map(|id| id.0.to_string()).unwrap_or_default(),
+                affinity_name: affinity_name.unwrap_or_default(),
+                create_config: create_config.map(into_proto_config),
+                reuse_auto_session,
+                ensure_commands,
+                writes: writes
+                    .into_iter()
+                    .map(|(path, bytes)| pb::RunFileWrite { path, bytes })
+                    .collect(),
+                command,
+                destroy_sandbox_on_expiry,
+            })
+            .await?
+            .into_inner();
+        Ok(StartedRun {
+            process: parse_process_info(
+                response
+                    .process
+                    .ok_or_else(|| anyhow::anyhow!("missing process info"))?,
+            )?,
+            sandbox: parse_sandbox_info(
+                response
+                    .sandbox
+                    .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?,
+            )?,
+            session_name: if response.session_name.is_empty() {
+                None
+            } else {
+                Some(response.session_name)
+            },
+            session_created: response.session_created,
+        })
     }
 
     pub async fn prepare_run_sandbox(

@@ -1526,6 +1526,8 @@ fn container_network_args(network: &NetworkMode) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::{
         AppleBackendConfig, AppleRuntimeKind, AppleSandbox, AppleVzBackend, DirectContainerSandbox,
         apple_allowlist_supported, container_network_args, ensure_supported_apple_network_mode,
@@ -1536,6 +1538,16 @@ mod tests {
         SandboxState,
     };
     use std::{fs, path::PathBuf};
+
+    fn unique_test_root() -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+        std::env::temp_dir().join(format!(
+            "hyperbox-apple-test-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[tokio::test]
     async fn create_requires_helper_command() {
@@ -1614,13 +1626,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_checks_direct_container_state_for_existing_entries() {
-        let root = std::env::temp_dir().join(format!(
-            "hyperbox-apple-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
-        ));
+        let root = unique_test_root();
         fs::create_dir_all(&root).expect("create temp root");
         let mock_container = root.join("mock-container");
         fs::write(
@@ -1679,13 +1685,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_checks_helper_managed_state_for_existing_entries() {
-        let root = std::env::temp_dir().join(format!(
-            "hyperbox-apple-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
-        ));
+        let root = unique_test_root();
         fs::create_dir_all(&root).expect("create temp root");
         let mock_helper = root.join("mock-helper");
         fs::write(

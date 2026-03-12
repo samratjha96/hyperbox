@@ -112,6 +112,15 @@ fn into_proto_prepared_run_sandbox(
     }
 }
 
+fn into_proto_started_run(started: crate::runtime::StartedRun) -> pb::StartRunResponse {
+    pb::StartRunResponse {
+        process: Some(into_proto_process(started.process)),
+        sandbox: Some(into_proto_info(started.sandbox)),
+        session_name: started.session_name.unwrap_or_default(),
+        session_created: started.session_created,
+    }
+}
+
 fn parse_stream_name(raw: &str) -> Result<StreamName, Status> {
     match raw {
         "stdout" | "Stdout" => Ok(StreamName::Stdout),
@@ -229,6 +238,44 @@ impl HyperboxControl for GrpcControlService {
         Ok(Response::new(pb::StartProcessResponse {
             process: Some(into_proto_process(process)),
         }))
+    }
+
+    async fn start_run(
+        &self,
+        request: Request<pb::StartRunRequest>,
+    ) -> Result<Response<pb::StartRunResponse>, Status> {
+        let peer = request.remote_addr();
+        let request = request.into_inner();
+        let started = self
+            .runtime
+            .start_run(crate::runtime::StartRunRequest {
+                sandbox_id: if request.sandbox_id.is_empty() {
+                    None
+                } else {
+                    Some(parse_sandbox_id(&request.sandbox_id)?)
+                },
+                affinity_name: if request.affinity_name.is_empty() {
+                    None
+                } else {
+                    Some(request.affinity_name)
+                },
+                create_config: request.create_config.map(from_proto_config),
+                reuse_auto_session: request.reuse_auto_session,
+                ensure_commands: request.ensure_commands,
+                writes: request
+                    .writes
+                    .into_iter()
+                    .map(|write| (write.path, write.bytes))
+                    .collect(),
+                command: request.command,
+                destroy_sandbox_on_expiry: request.destroy_sandbox_on_expiry,
+            })
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, error = %e, "grpc start_run failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(into_proto_started_run(started)))
     }
 
     async fn prepare_run_sandbox(

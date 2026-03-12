@@ -196,6 +196,29 @@ message PrepareRunSandboxResponse {
   string disposition = 3;
 }
 
+message RunFileWrite {
+  string path = 1;
+  bytes bytes = 2;
+}
+
+message StartRunRequest {
+  string sandbox_id = 1;
+  string affinity_name = 2;
+  SandboxConfig create_config = 3;
+  bool reuse_auto_session = 4;
+  repeated string ensure_commands = 5;
+  repeated RunFileWrite writes = 6;
+  string command = 7;
+  bool destroy_sandbox_on_expiry = 8;
+}
+
+message StartRunResponse {
+  ProcessInfo process = 1;
+  SandboxInfo sandbox = 2;
+  string session_name = 3;
+  bool session_created = 4;
+}
+
 message StartProcessRequest {
   string sandbox_id = 1;
   repeated string command = 2;
@@ -291,6 +314,7 @@ service HyperboxControl {
   rpc InspectSandbox(InspectSandboxRequest) returns (InspectSandboxResponse);
   rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
   rpc PrepareRunSandbox(PrepareRunSandboxRequest) returns (PrepareRunSandboxResponse);
+  rpc StartRun(StartRunRequest) returns (StartRunResponse);
   rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
   rpc GetProcess(GetProcessRequest) returns (GetProcessResponse);
   rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);

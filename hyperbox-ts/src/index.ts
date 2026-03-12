@@ -113,6 +113,35 @@ export interface PreparedRunSandbox {
   disposition: ProcessDisposition;
 }
 
+export interface StartedRun {
+  process: ProcessInfo;
+  sandbox: SandboxInfo;
+  sessionName?: string;
+  sessionCreated: boolean;
+}
+
+export interface RunWrite {
+  path: string;
+  content: string | Uint8Array;
+}
+
+export interface RunOptions extends CreateSandboxOptions {
+  sandboxId?: string;
+  affinityName?: string;
+  ensureCommands?: string[];
+  writes?: RunWrite[];
+  reads?: string[];
+  command: string;
+  detach?: boolean;
+  ephemeral?: boolean;
+}
+
+export interface RunResult extends StartedRun {
+  stdout: string;
+  stderr: string;
+  artifacts: Record<string, string>;
+}
+
 type RpcRequest = Record<string, unknown>;
 type RpcCallback<T> = (err: grpc.ServiceError | null, response?: T) => void;
 type RpcMethod<TRequest extends RpcRequest, TResponse> = (
@@ -321,6 +350,17 @@ export class HyperboxClient {
     });
   }
 
+  async readFile(sandboxId: string, path: string): Promise<Uint8Array> {
+    const response = await this.rpc<
+      { sandbox_id: string; path: string },
+      { bytes: Buffer }
+    >("ReadFile", {
+      sandbox_id: sandboxId,
+      path,
+    });
+    return response.bytes;
+  }
+
   async inspectSandbox(
     sandboxId: string,
   ): Promise<{ sandbox: SandboxInfo; config: SandboxConfig }> {
@@ -381,6 +421,57 @@ export class HyperboxClient {
       sandbox: mapSandboxInfo(requireField(response.info, "sandbox info")),
       requestedSandboxId: response.requested_sandbox_id || undefined,
       disposition: camelToSnake(response.disposition) as ProcessDisposition,
+    };
+  }
+
+  async startRun(
+    sandboxId: string | undefined,
+    affinityName: string | undefined,
+    createConfig: CreateSandboxOptions | undefined,
+    reuseAutoSession: boolean,
+    ensureCommands: string[],
+    writes: RunWrite[],
+    command: string,
+    destroySandboxOnExpiry: boolean,
+  ): Promise<StartedRun> {
+    const response = await this.rpc<
+      {
+        sandbox_id: string;
+        affinity_name: string;
+        create_config?: RawSandboxConfig;
+        reuse_auto_session: boolean;
+        ensure_commands: string[];
+        writes: Array<{ path: string; bytes: Uint8Array }>;
+        command: string;
+        destroy_sandbox_on_expiry: boolean;
+      },
+      {
+        process?: RawProcessInfo;
+        sandbox?: RawSandboxInfo;
+        session_name: string;
+        session_created: boolean;
+      }
+    >("StartRun", {
+      sandbox_id: sandboxId ?? "",
+      affinity_name: affinityName ?? "",
+      create_config: createConfig ? mapSandboxConfig(createConfig) : undefined,
+      reuse_auto_session: reuseAutoSession,
+      ensure_commands: ensureCommands,
+      writes: writes.map((write) => ({
+        path: write.path,
+        bytes:
+          typeof write.content === "string"
+            ? Buffer.from(write.content)
+            : write.content,
+      })),
+      command,
+      destroy_sandbox_on_expiry: destroySandboxOnExpiry,
+    });
+    return {
+      process: mapProcessInfo(requireField(response.process, "process")),
+      sandbox: mapSandboxInfo(requireField(response.sandbox, "sandbox")),
+      sessionName: response.session_name || undefined,
+      sessionCreated: response.session_created,
     };
   }
 
@@ -478,5 +569,70 @@ export class HyperboxClient {
       process_id: processId,
     });
     return mapProcessInfo(requireField(response.process, "process"));
+  }
+
+  async run(options: RunOptions): Promise<RunResult> {
+    const started = await this.startRun(
+      options.sandboxId,
+      options.affinityName,
+      options.sandboxId || options.affinityName ? undefined : options,
+      !options.sandboxId && !options.affinityName && !options.ephemeral,
+      options.ensureCommands ?? [],
+      options.writes ?? [],
+      options.command,
+      Boolean(options.detach && options.ephemeral),
+    );
+
+    if (options.detach) {
+      return {
+        ...started,
+        stdout: "",
+        stderr: "",
+        artifacts: {},
+      };
+    }
+
+    const completed = await this.waitProcess(started.process.processId, {
+      timeoutSecs: options.timeoutSecs ?? 60,
+    });
+    const stdout = await this.readAllProcessLog(started.process.processId, "stdout");
+    const stderr = await this.readAllProcessLog(started.process.processId, "stderr");
+    const artifacts: Record<string, string> = {};
+    for (const path of options.reads ?? []) {
+      const bytes = await this.readFile(started.sandbox.id, path);
+      artifacts[path] = Buffer.from(bytes).toString("utf8");
+    }
+
+    if (options.ephemeral) {
+      await this.destroySandbox(started.sandbox.id);
+    }
+
+    return {
+      process: completed,
+      sandbox: started.sandbox,
+      sessionName: started.sessionName,
+      sessionCreated: started.sessionCreated,
+      stdout,
+      stderr,
+      artifacts,
+    };
+  }
+
+  private async readAllProcessLog(
+    processId: string,
+    stream: LogStream,
+  ): Promise<string> {
+    let offset = 0;
+    let contents = "";
+    while (true) {
+      const chunk = await this.readProcessLog(processId, stream, { offset });
+      if (chunk.contents) {
+        contents += chunk.contents;
+        offset = chunk.nextOffset;
+      }
+      if (chunk.eof) {
+        return contents;
+      }
+    }
   }
 }

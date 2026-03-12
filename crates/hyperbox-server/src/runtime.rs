@@ -36,6 +36,26 @@ pub struct PreparedRunSandbox {
     pub disposition: ProcessDisposition,
 }
 
+#[derive(Debug, Clone)]
+pub struct StartRunRequest {
+    pub sandbox_id: Option<SandboxId>,
+    pub affinity_name: Option<String>,
+    pub create_config: Option<SandboxConfig>,
+    pub reuse_auto_session: bool,
+    pub ensure_commands: Vec<String>,
+    pub writes: Vec<(String, Vec<u8>)>,
+    pub command: String,
+    pub destroy_sandbox_on_expiry: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartedRun {
+    pub process: ProcessInfo,
+    pub sandbox: SandboxInfo,
+    pub session_name: Option<String>,
+    pub session_created: bool,
+}
+
 impl HyperboxServer {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
         if cfg!(test) {
@@ -218,6 +238,103 @@ impl HyperboxServer {
         }
 
         self.refresh_process(process).await
+    }
+
+    pub async fn start_run(&self, request: StartRunRequest) -> Result<StartedRun> {
+        self.ensure_hydrated().await?;
+        self.cleanup_expired_processes().await?;
+        if request.command.trim().is_empty() {
+            return Err(HyperboxError::InvalidConfig(
+                "run command cannot be empty".to_string(),
+            ));
+        }
+
+        let mut session_name = None;
+        let mut session_created = false;
+        let prepared = if let Some(sandbox_id) = request.sandbox_id.as_ref() {
+            let config = self.sandbox_config(sandbox_id).await?;
+            self.prepare_run_sandbox(sandbox_id, Some(config)).await?
+        } else if let Some(name) = request.affinity_name.as_deref() {
+            let (sandbox, _) = self.resolve_affinity(name, true).await?;
+            let config = self.sandbox_config(&sandbox.id).await?;
+            self.prepare_run_sandbox(&sandbox.id, Some(config)).await?
+        } else if let Some(mut config) = request.create_config.clone() {
+            if request.reuse_auto_session {
+                let derived = derive_auto_run_affinity_name(
+                    &config.template,
+                    config.workspace_dir.as_deref(),
+                    &config.network,
+                );
+                session_name = Some(derived.clone());
+                config.affinity_name = Some(derived);
+                match self
+                    .resolve_affinity(session_name.as_deref().unwrap_or_default(), false)
+                    .await
+                {
+                    Ok((sandbox, _)) => {
+                        let mut overflow_config = self.sandbox_config(&sandbox.id).await?;
+                        overflow_config.affinity_name = None;
+                        self.prepare_run_sandbox(&sandbox.id, Some(overflow_config))
+                            .await?
+                    }
+                    Err(err) if is_affinity_absent_error(&err) => {
+                        let sandbox = self.create_sandbox(config).await?;
+                        session_created = true;
+                        PreparedRunSandbox {
+                            info: sandbox,
+                            requested_sandbox_id: None,
+                            disposition: ProcessDisposition::CreatedNew,
+                        }
+                    }
+                    Err(err) => return Err(err),
+                }
+            } else {
+                let sandbox = self.create_sandbox(config).await?;
+                PreparedRunSandbox {
+                    info: sandbox,
+                    requested_sandbox_id: None,
+                    disposition: ProcessDisposition::CreatedNew,
+                }
+            }
+        } else {
+            return Err(HyperboxError::InvalidConfig(
+                "run target requires sandbox_id, affinity_name, or create_config".to_string(),
+            ));
+        };
+
+        for (path, bytes) in &request.writes {
+            self.backend
+                .write_file(
+                    &prepared.info.id,
+                    FilePayload {
+                        path: path.clone().into(),
+                        bytes: bytes.clone(),
+                    },
+                )
+                .await?;
+        }
+
+        let timeout_secs = self.sandbox_config(&prepared.info.id).await?.timeout_secs;
+        self.run_ensure_commands(&prepared.info.id, &request.ensure_commands, timeout_secs)
+            .await?;
+
+        let process = self
+            .start_process(
+                &prepared.info.id,
+                vec!["/bin/sh".to_string(), "-lc".to_string(), request.command],
+                prepared.requested_sandbox_id.clone(),
+                prepared.disposition.clone(),
+                request.destroy_sandbox_on_expiry
+                    || prepared.disposition == ProcessDisposition::CreatedDueToBusy,
+            )
+            .await?;
+
+        Ok(StartedRun {
+            process,
+            sandbox: prepared.info,
+            session_name,
+            session_created,
+        })
     }
 
     pub async fn get_process(&self, process_id: &ProcessId) -> Result<ProcessInfo> {
@@ -723,6 +840,43 @@ impl HyperboxServer {
         Ok(())
     }
 
+    async fn run_ensure_commands(
+        &self,
+        sandbox_id: &SandboxId,
+        ensure_commands: &[String],
+        timeout_secs: u64,
+    ) -> Result<()> {
+        for ensure in ensure_commands {
+            let marker = format!(".hyperbox/ensure/{:016x}.done", fnv1a64(ensure.as_bytes()));
+            let script = format!(
+                "set -e\nmkdir -p .hyperbox/ensure\nif [ ! -f \"{marker}\" ]; then\n{ensure}\ntouch \"{marker}\"\nfi"
+            );
+            let outcome = self
+                .backend
+                .exec(
+                    sandbox_id,
+                    ExecRequest {
+                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), script],
+                        timeout_secs,
+                    },
+                )
+                .await?;
+            if outcome.exit_code != 0 {
+                let stderr = outcome.stderr.trim();
+                let message = if stderr.is_empty() {
+                    format!("--ensure step failed with exit code {}", outcome.exit_code)
+                } else {
+                    format!(
+                        "--ensure step failed with exit code {}: {stderr}",
+                        outcome.exit_code
+                    )
+                };
+                return Err(HyperboxError::ExecutionFailed(message));
+            }
+        }
+        Ok(())
+    }
+
     async fn purge_process(&self, process: &ProcessInfo) -> Result<()> {
         match self.backend.inspect(&process.sandbox_id).await {
             Ok(_) if process.destroy_sandbox_on_expiry => {
@@ -905,6 +1059,80 @@ fn shell_join(command: &[String]) -> String {
 
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn derive_auto_run_affinity_name(
+    template: &str,
+    workspace_dir: Option<&str>,
+    network: &hyperbox_core::NetworkMode,
+) -> String {
+    let mut scope = String::new();
+    scope.push_str(template);
+    scope.push('\n');
+    scope.push_str(workspace_dir.unwrap_or(""));
+    scope.push('\n');
+    scope.push_str(match network {
+        hyperbox_core::NetworkMode::None => "none",
+        hyperbox_core::NetworkMode::Full => "full",
+        hyperbox_core::NetworkMode::Allowlist(domains) => {
+            if domains.is_empty() {
+                "allowlist"
+            } else {
+                return format!(
+                    "auto-{}-{:016x}",
+                    sanitize_affinity_component(template, 18),
+                    fnv1a64(
+                        format!(
+                            "{template}\n{}\nallowlist:{}",
+                            workspace_dir.unwrap_or(""),
+                            domains.join(",")
+                        )
+                        .as_bytes()
+                    )
+                );
+            }
+        }
+    });
+    let hash = fnv1a64(scope.as_bytes());
+    let template_slug = sanitize_affinity_component(template, 18);
+    format!("auto-{template_slug}-{hash:016x}")
+}
+
+fn sanitize_affinity_component(raw: &str, max_len: usize) -> String {
+    let sanitized = raw
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | '0'..='9' => ch,
+            'A'..='Z' => ch.to_ascii_lowercase(),
+            _ => '-',
+        })
+        .collect::<String>();
+    let trimmed = sanitized
+        .trim_matches('-')
+        .chars()
+        .take(max_len)
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if trimmed.is_empty() {
+        "sandbox".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn is_affinity_absent_error(err: &HyperboxError) -> bool {
+    let message = err.to_string();
+    message.contains("affinity not found") || message.contains("has no active sandbox")
 }
 
 fn snapshot_artifact_path(snapshot_id: &SnapshotId) -> Result<PathBuf> {
@@ -1348,5 +1576,68 @@ mod tests {
             .await
             .expect("sandbox should remain");
         assert_eq!(inspected.id, sandbox.id);
+    }
+
+    #[tokio::test]
+    async fn start_run_reuses_auto_session_and_applies_setup_steps() {
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-start-run-auto-session-test",
+        ))));
+        let server = HyperboxServer::new(backend);
+
+        let first = server
+            .start_run(StartRunRequest {
+                sandbox_id: None,
+                affinity_name: None,
+                create_config: Some(SandboxConfig::default()),
+                reuse_auto_session: true,
+                ensure_commands: vec!["printf ensured > ensured.txt".to_string()],
+                writes: vec![("input.txt".to_string(), b"seed".to_vec())],
+                command: "cat input.txt && printf ':' && cat ensured.txt".to_string(),
+                destroy_sandbox_on_expiry: false,
+            })
+            .await
+            .expect("start first run");
+        assert!(first.session_created);
+        assert!(first.session_name.is_some());
+        assert_eq!(first.process.status, ProcessStatus::Running);
+
+        let first_done = server
+            .wait_process(&first.process.id, 5)
+            .await
+            .expect("wait first run");
+        assert_eq!(first_done.status, ProcessStatus::Succeeded);
+        let first_stdout = server
+            .read_process_log(&first.process.id, StreamName::Stdout, 0, 1024)
+            .await
+            .expect("read first stdout");
+        assert_eq!(first_stdout.contents, "seed:ensured");
+
+        let second = server
+            .start_run(StartRunRequest {
+                sandbox_id: None,
+                affinity_name: None,
+                create_config: Some(SandboxConfig::default()),
+                reuse_auto_session: true,
+                ensure_commands: vec!["printf ensured > ensured.txt".to_string()],
+                writes: vec![],
+                command: "cat input.txt && printf ':' && cat ensured.txt".to_string(),
+                destroy_sandbox_on_expiry: false,
+            })
+            .await
+            .expect("start second run");
+        assert!(!second.session_created);
+        assert_eq!(second.sandbox.id, first.sandbox.id);
+
+        let second_done = server
+            .wait_process(&second.process.id, 5)
+            .await
+            .expect("wait second run");
+        assert_eq!(second_done.status, ProcessStatus::Succeeded);
+        let second_stdout = server
+            .read_process_log(&second.process.id, StreamName::Stdout, 0, 1024)
+            .await
+            .expect("read second stdout");
+        assert_eq!(second_stdout.contents, "seed:ensured");
     }
 }

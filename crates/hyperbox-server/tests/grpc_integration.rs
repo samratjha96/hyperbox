@@ -194,3 +194,79 @@ async fn grpc_prepare_run_sandbox_overflows_when_busy() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn grpc_start_run_overflows_busy_named_sandbox() {
+    unsafe { std::env::set_var("HYPERBOX_BACKEND", "local") };
+
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind ephemeral port: {err}"),
+    };
+    let addr = listener.local_addr().expect("read local addr");
+    drop(listener);
+
+    let server = tokio::spawn(async move {
+        serve_grpc(addr).await.expect("serve grpc");
+    });
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let endpoint = format!("http://{}", addr);
+    let mut client = GrpcControlClient::connect(endpoint)
+        .await
+        .expect("connect grpc client");
+
+    client
+        .create_sandbox(SandboxConfig {
+            affinity_name: Some("sdk-demo".to_string()),
+            ..SandboxConfig::default()
+        })
+        .await
+        .expect("create named sandbox");
+
+    let first = client
+        .start_run(
+            None,
+            Some("sdk-demo".to_string()),
+            None,
+            false,
+            vec![],
+            vec![],
+            "sleep 30".to_string(),
+            false,
+        )
+        .await
+        .expect("start first run");
+    assert_eq!(first.process.status, ProcessStatus::Running);
+    assert_eq!(
+        first.process.disposition,
+        ProcessDisposition::ReusedExisting
+    );
+
+    let second = client
+        .start_run(
+            None,
+            Some("sdk-demo".to_string()),
+            None,
+            false,
+            vec![],
+            vec![],
+            "printf overflow".to_string(),
+            false,
+        )
+        .await
+        .expect("start overflow run");
+    assert_eq!(
+        second.process.disposition,
+        ProcessDisposition::CreatedDueToBusy
+    );
+    assert_ne!(second.process.sandbox_id, first.process.sandbox_id);
+    assert_eq!(
+        second.process.requested_sandbox_id,
+        Some(first.process.sandbox_id)
+    );
+
+    server.abort();
+}

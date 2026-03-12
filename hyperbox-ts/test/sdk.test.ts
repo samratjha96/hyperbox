@@ -77,3 +77,27 @@ test("sdk runs and manages a detached process", async () => {
   await client.destroySandbox(sandbox.id);
   await client.close();
 });
+
+test("sdk run reuses the same auto session by default", async () => {
+  await waitForServer();
+  const client = new HyperboxClient(serverUrl.replace("http://", ""));
+
+  const first = await client.run({
+    template: "python:3.12",
+    command: "echo sdk-state > .sdk_reuse_test",
+  });
+  assert.equal(first.process.status, "succeeded");
+  assert.equal(first.sessionCreated, true);
+  assert.ok(first.sessionName);
+
+  const second = await client.run({
+    template: "python:3.12",
+    command: "cat .sdk_reuse_test",
+  });
+  assert.equal(second.process.status, "succeeded");
+  assert.equal(second.sessionCreated, false);
+  assert.equal(second.sessionName, first.sessionName);
+  assert.match(second.stdout, /sdk-state/);
+
+  await client.close();
+});
