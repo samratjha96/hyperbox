@@ -1,0 +1,286 @@
+syntax = "proto3";
+
+package hyperbox.v1;
+
+message SandboxConfig {
+  string template = 1;
+  uint32 memory_mb = 2;
+  uint32 vcpu_count = 3;
+  uint64 timeout_secs = 4;
+  map<string, string> env = 5;
+  NetworkMode network_mode = 6;
+  repeated string network_allowlist = 7;
+  string workspace_dir = 8;
+  string affinity_name = 9;
+}
+
+message SandboxId {
+  string value = 1;
+}
+
+message SandboxInfo {
+  string id = 1;
+  string template = 2;
+  string state = 3;
+  string created_at = 4;
+}
+
+message ExecRequest {
+  string sandbox_id = 1;
+  repeated string command = 2;
+  uint64 timeout_secs = 3;
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  uint64 duration_ms = 4;
+}
+
+message CreateSandboxRequest {
+  SandboxConfig config = 1;
+}
+
+message CreateSandboxResponse {
+  SandboxInfo info = 1;
+}
+
+message DestroySandboxRequest {
+  string sandbox_id = 1;
+}
+
+message DestroySandboxResponse {}
+
+message InspectSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message InspectSandboxResponse {
+  SandboxInfo info = 1;
+  SandboxConfig config = 2;
+}
+
+message ListSandboxesRequest {}
+
+message ActiveSandboxInfo {
+  SandboxInfo info = 1;
+  string affinity_name = 2;
+}
+
+message ListSandboxesResponse {
+  repeated ActiveSandboxInfo sandboxes = 1;
+}
+
+message ReadFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+}
+
+message ReadFileResponse {
+  bytes bytes = 1;
+}
+
+message WriteFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+  bytes bytes = 3;
+}
+
+message WriteFileResponse {}
+
+message ListTemplatesRequest {}
+
+message ListTemplatesResponse {
+  repeated string templates = 1;
+}
+
+message MetricsRequest {}
+
+message MetricsResponse {
+  uint64 creates = 1;
+  uint64 destroys = 2;
+  uint64 execs = 3;
+  uint64 exec_failures = 4;
+  uint64 p50_exec_ms = 5;
+  uint64 p95_exec_ms = 6;
+}
+
+message ServerInfoRequest {}
+
+message ServerInfoResponse {
+  string server_version = 1;
+  string process_id = 2;
+  string executable_path = 3;
+  string started_at = 4;
+  string backend_requested = 5;
+  string backend_selected = 6;
+  string backend_reason = 7;
+  string apple_runtime = 8;
+  repeated string apple_helper_argv = 9;
+}
+
+message CreateSnapshotRequest {
+  string sandbox_id = 1;
+  string template = 2;
+  string note = 3;
+}
+
+message CreateSnapshotResponse {
+  string snapshot_id = 1;
+  string created_at = 2;
+}
+
+message RestoreSnapshotRequest {
+  string snapshot_id = 1;
+}
+
+message RestoreSnapshotResponse {
+  SandboxInfo info = 1;
+}
+
+message SnapshotInfo {
+  string snapshot_id = 1;
+  string sandbox_id = 2;
+  string template = 3;
+  string created_at = 4;
+  string note = 5;
+  string affinity_name = 6;
+}
+
+message ListSnapshotsRequest {
+  string template = 1;
+}
+
+message ListSnapshotsResponse {
+  repeated SnapshotInfo snapshots = 1;
+}
+
+message ResolveAffinityRequest {
+  string name = 1;
+  bool restore_if_needed = 2;
+}
+
+message ResolveAffinityResponse {
+  SandboxInfo info = 1;
+  bool restored = 2;
+}
+
+message ProcessInfo {
+  string process_id = 1;
+  string sandbox_id = 2;
+  string requested_sandbox_id = 3;
+  string disposition = 4;
+  bool destroy_sandbox_on_expiry = 5;
+  repeated string command = 6;
+  string status = 7;
+  string stdout_path = 8;
+  string stderr_path = 9;
+  uint32 backend_pid = 10;
+  bool has_backend_pid = 11;
+  int32 exit_code = 12;
+  bool has_exit_code = 13;
+  string started_at = 14;
+  string finished_at = 15;
+  string expires_at = 16;
+}
+
+message PrepareRunSandboxRequest {
+  string sandbox_id = 1;
+  SandboxConfig overflow_config = 2;
+}
+
+message PrepareRunSandboxResponse {
+  SandboxInfo info = 1;
+  string requested_sandbox_id = 2;
+  string disposition = 3;
+}
+
+message StartProcessRequest {
+  string sandbox_id = 1;
+  repeated string command = 2;
+  string requested_sandbox_id = 3;
+  string disposition = 4;
+  bool destroy_sandbox_on_expiry = 5;
+}
+
+message StartProcessResponse {
+  ProcessInfo process = 1;
+}
+
+message GetProcessRequest {
+  string process_id = 1;
+}
+
+message GetProcessResponse {
+  ProcessInfo process = 1;
+}
+
+message ListProcessesRequest {}
+
+message ListProcessesResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message ReadProcessLogRequest {
+  string process_id = 1;
+  string stream = 2;
+  uint64 offset = 3;
+  uint64 limit = 4;
+}
+
+message ReadProcessLogResponse {
+  string stream = 1;
+  uint64 offset = 2;
+  uint64 next_offset = 3;
+  bool eof = 4;
+  string contents = 5;
+}
+
+message WaitProcessRequest {
+  string process_id = 1;
+  uint64 timeout_secs = 2;
+}
+
+message WaitProcessResponse {
+  ProcessInfo process = 1;
+}
+
+message CancelProcessRequest {
+  string process_id = 1;
+}
+
+message CancelProcessResponse {
+  ProcessInfo process = 1;
+}
+
+enum NetworkMode {
+  NETWORK_MODE_UNSPECIFIED = 0;
+  NETWORK_MODE_NONE = 1;
+  NETWORK_MODE_ALLOWLIST = 2;
+  NETWORK_MODE_FULL = 3;
+}
+
+service HyperboxControl {
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc GetServerInfo(ServerInfoRequest) returns (ServerInfoResponse);
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
+  rpc InspectSandbox(InspectSandboxRequest) returns (InspectSandboxResponse);
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc RestoreSnapshot(RestoreSnapshotRequest) returns (RestoreSnapshotResponse);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc ResolveAffinity(ResolveAffinityRequest) returns (ResolveAffinityResponse);
+  rpc PrepareRunSandbox(PrepareRunSandboxRequest) returns (PrepareRunSandboxResponse);
+  rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
+  rpc GetProcess(GetProcessRequest) returns (GetProcessResponse);
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+  rpc ReadProcessLog(ReadProcessLogRequest) returns (ReadProcessLogResponse);
+  rpc WaitProcess(WaitProcessRequest) returns (WaitProcessResponse);
+  rpc CancelProcess(CancelProcessRequest) returns (CancelProcessResponse);
+}

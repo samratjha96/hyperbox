@@ -2,3 +2,5 @@
 .DS_Store
 __pycache__/
 *.pyc
+hyperbox-ts/node_modules/
+hyperbox-ts/dist/
