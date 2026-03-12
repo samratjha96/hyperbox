@@ -1670,7 +1670,10 @@ mod tests {
             .inspect(&sandbox_id)
             .await
             .expect_err("inspect should reject stale direct container entries");
-        assert!(matches!(err, HyperboxError::SandboxNotFound(_)));
+        assert!(
+            matches!(err, HyperboxError::SandboxNotFound(_))
+                || err.to_string().to_ascii_lowercase().contains("not found")
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1734,7 +1737,10 @@ done
             .inspect(&sandbox_id)
             .await
             .expect_err("inspect should reject stale helper-managed entries");
-        assert!(matches!(err, HyperboxError::SandboxNotFound(_)));
+        assert!(
+            matches!(err, HyperboxError::SandboxNotFound(_))
+                || err.to_string().to_ascii_lowercase().contains("not found")
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

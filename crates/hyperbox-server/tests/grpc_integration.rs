@@ -174,7 +174,7 @@ async fn grpc_prepare_run_sandbox_overflows_when_busy() {
             vec![
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
-                "sleep 2".to_string(),
+                "sleep 30".to_string(),
             ],
             None,
             ProcessDisposition::ReusedExisting,

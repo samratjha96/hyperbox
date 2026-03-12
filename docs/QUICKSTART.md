@@ -98,6 +98,13 @@ $HB cancel <process-id>
 $HB probe
 ```
 
+## 8) SDKs
+
+- Python SDK: `hyperbox-py`
+- TypeScript SDK: `hyperbox-ts`
+
+Both speak to the same gRPC control plane as the CLI and use the same managed-process model.
+
 ## Notes
 
 - `run`, `run --detach`, `logs`, `wait`, and `cancel` all operate on the same managed-process model.

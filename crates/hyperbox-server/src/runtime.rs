@@ -1135,7 +1135,7 @@ mod tests {
                 vec![
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "sleep 2".to_string(),
+                    "sleep 30".to_string(),
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,
@@ -1221,7 +1221,7 @@ mod tests {
                 vec![
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "sleep 2".to_string(),
+                    "sleep 30".to_string(),
                 ],
                 None,
                 ProcessDisposition::ReusedExisting,

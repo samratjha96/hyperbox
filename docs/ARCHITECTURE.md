@@ -66,7 +66,7 @@ backend-specific sandbox runtime
 - `hyperbox run --detach` starts the same managed process but returns immediately.
 - `hyperbox logs`, `hyperbox wait`, and `hyperbox cancel` operate on that process id.
 - One sandbox can have one managed foreground process at a time.
-- If the CLI targets a busy sandbox, it creates a fresh sandbox for that run and reports the overflow explicitly.
+- If a run targets a busy sandbox, the control plane creates a fresh sandbox for that run and reports the overflow explicitly.
 
 ## Durability Model
 

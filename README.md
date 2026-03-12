@@ -162,7 +162,6 @@ Top-level commands:
 - `templates`: list templates
 - `probe`: host capability probe
 - `setup`: host prerequisite setup
-- `proxy`: stdio JSON-lines adapter mode
 - `snapshot`: `create`, `restore`, `list`
 
 Common flows:
@@ -194,7 +193,6 @@ For complete command flags:
 ```bash
 hyperbox --help
 hyperbox run --help
-hyperbox proxy --help
 hyperbox snapshot --help
 ```
 
@@ -243,10 +241,30 @@ The gRPC control plane is the stable integration surface.
 Current in-repo examples and tooling focus on:
 
 - CLI-driven human workflows
-- gRPC client integrations
-- adapter-style agent integrations
+- Python SDK in [`hyperbox-py`](hyperbox-py)
+- TypeScript SDK in [`hyperbox-ts`](hyperbox-ts)
 
-TypeScript SDK work is planned to expose the same managed-process model directly to external agent runtimes.
+Both SDKs talk to the same managed-process gRPC control plane used by the CLI.
+
+TypeScript example:
+
+```ts
+import { HyperboxClient } from "@hyperbox/sdk";
+
+const client = new HyperboxClient("127.0.0.1:50051");
+const sandbox = await client.createSandbox({ template: "python:3.12" });
+const process = await client.startProcess({
+  sandboxId: sandbox.id,
+  command: ["/bin/sh", "-lc", "python3 -c 'print(2 + 2)'"],
+});
+const completed = await client.waitProcess(process.processId, { timeoutSecs: 30 });
+const stdout = await client.readProcessLog(process.processId, "stdout");
+
+console.log(completed.status, stdout.contents);
+
+await client.destroySandbox(sandbox.id);
+await client.close();
+```
 
 ## Performance and Benchmarks
 
