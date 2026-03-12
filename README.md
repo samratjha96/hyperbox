@@ -252,17 +252,13 @@ TypeScript example:
 import { HyperboxClient } from "@hyperbox/sdk";
 
 const client = new HyperboxClient("127.0.0.1:50051");
-const sandbox = await client.createSandbox({ template: "python:3.12" });
-const process = await client.startProcess({
-  sandboxId: sandbox.id,
-  command: ["/bin/sh", "-lc", "python3 -c 'print(2 + 2)'"],
+const result = await client.run({
+  template: "python:3.12",
+  command: "python3 -c 'print(2 + 2)'",
 });
-const completed = await client.waitProcess(process.processId, { timeoutSecs: 30 });
-const stdout = await client.readProcessLog(process.processId, "stdout");
 
-console.log(completed.status, stdout.contents);
+console.log(result.status, result.stdout);
 
-await client.destroySandbox(sandbox.id);
 await client.close();
 ```
 
