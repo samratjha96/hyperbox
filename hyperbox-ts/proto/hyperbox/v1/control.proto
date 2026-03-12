@@ -291,7 +291,6 @@ service HyperboxControl {
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
   rpc InspectSandbox(InspectSandboxRequest) returns (InspectSandboxResponse);
   rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
-  rpc Exec(ExecRequest) returns (ExecResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use hyperbox_core::{ExecRequest, ProcessDisposition, ProcessStatus, SandboxConfig, StreamName};
+use hyperbox_core::{ProcessDisposition, ProcessStatus, SandboxConfig, StreamName};
 use hyperbox_server::{GrpcControlClient, serve_grpc};
 
 #[tokio::test]
@@ -36,23 +36,31 @@ async fn grpc_roundtrip_lifecycle() {
         .await
         .expect("write file");
 
-    let out = client
-        .exec(
-            &sandbox.id,
-            ExecRequest {
-                command: vec![
-                    "/bin/sh".to_string(),
-                    "-lc".to_string(),
-                    "cat input.txt".to_string(),
-                ],
-                timeout_secs: 2,
-            },
+    let started = client
+        .start_run(
+            Some(sandbox.id.clone()),
+            None,
+            None,
+            false,
+            vec![],
+            vec![],
+            "cat input.txt".to_string(),
+            false,
         )
         .await
-        .expect("exec command");
+        .expect("start run");
 
-    assert_eq!(out.exit_code, 0);
-    assert!(out.stdout.contains("grpc-ok"));
+    let completed = client
+        .wait_process(&started.process.id, 5)
+        .await
+        .expect("wait process");
+    assert_eq!(completed.status, ProcessStatus::Succeeded);
+
+    let stdout = client
+        .read_process_log(&started.process.id, StreamName::Stdout, 0, 8192)
+        .await
+        .expect("read stdout");
+    assert!(stdout.contents.contains("grpc-ok"));
 
     let bytes = client
         .read_file(&sandbox.id, "input.txt".to_string())

@@ -1,7 +1,6 @@
 use hyperbox_core::{
-    ExecOutcome, ExecRequest, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo,
-    ProcessLogRead, ProcessStatus, SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata,
-    StreamName,
+    NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, ProcessLogRead, ProcessStatus,
+    SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata, StreamName,
 };
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_client::HyperboxControlClient};
 
@@ -216,29 +215,6 @@ impl GrpcControlClient {
             },
             created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
                 .with_timezone(&chrono::Utc),
-        })
-    }
-
-    pub async fn exec(
-        &mut self,
-        sandbox_id: &hyperbox_core::SandboxId,
-        request: ExecRequest,
-    ) -> anyhow::Result<ExecOutcome> {
-        let response = self
-            .inner
-            .exec(pb::ExecRequest {
-                sandbox_id: sandbox_id.0.to_string(),
-                command: request.command,
-                timeout_secs: request.timeout_secs,
-            })
-            .await?
-            .into_inner();
-
-        Ok(ExecOutcome {
-            exit_code: response.exit_code,
-            stdout: response.stdout,
-            stderr: response.stderr,
-            duration_ms: response.duration_ms as u128,
         })
     }
 

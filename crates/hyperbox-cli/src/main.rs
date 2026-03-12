@@ -1616,6 +1616,41 @@ struct ProcessLogs {
     stderr: String,
 }
 
+struct SyncRunOutcome {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    duration_ms: u128,
+}
+
+async fn run_sync_in_sandbox(
+    client: &mut GrpcControlClient,
+    sandbox_id: &SandboxId,
+    command: String,
+    timeout_secs: u64,
+) -> anyhow::Result<SyncRunOutcome> {
+    let started = Instant::now();
+    let process = client
+        .start_run(
+            Some(sandbox_id.clone()),
+            None,
+            None,
+            false,
+            vec![],
+            vec![],
+            command,
+            false,
+        )
+        .await?;
+    let outcome = wait_for_process_outcome(client, &process.process.id, timeout_secs, true).await?;
+    Ok(SyncRunOutcome {
+        exit_code: outcome.exit_code,
+        stdout: outcome.stdout,
+        stderr: outcome.stderr,
+        duration_ms: started.elapsed().as_millis(),
+    })
+}
+
 async fn wait_for_process_outcome(
     client: &mut GrpcControlClient,
     process_id: &ProcessId,
@@ -2004,14 +2039,7 @@ async fn open_shell_local(
     sandbox_id: &SandboxId,
     shell: &str,
 ) -> anyhow::Result<i32> {
-    let probe = client
-        .exec(
-            sandbox_id,
-            ExecRequest {
-                command: vec!["/bin/sh".to_string(), "-lc".to_string(), "pwd".to_string()],
-                timeout_secs: 10,
-            },
-        )
+    let probe = run_sync_in_sandbox(client, sandbox_id, "pwd".to_string(), 10)
         .await
         .context("probe sandbox working directory")?;
     if probe.exit_code != 0 {
@@ -2301,26 +2329,21 @@ async fn run_proxy_loop(server_url: Option<String>, config: SandboxConfig) -> an
         }
 
         let response = match serde_json::from_str::<ProxyRequest>(&line) {
-            Ok(ProxyRequest::Exec { cmd, timeout }) => match client
-                .exec(
-                    &sandbox_id,
-                    ExecRequest {
-                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd],
-                        timeout_secs: timeout.unwrap_or(60),
+            Ok(ProxyRequest::Exec { cmd, timeout }) => {
+                match run_sync_in_sandbox(&mut client, &sandbox_id, cmd, timeout.unwrap_or(60))
+                    .await
+                {
+                    Ok(outcome) => ProxyResponse::Exec {
+                        exit_code: outcome.exit_code,
+                        duration_ms: outcome.duration_ms,
+                        stdout: outcome.stdout,
+                        stderr: outcome.stderr,
                     },
-                )
-                .await
-            {
-                Ok(outcome) => ProxyResponse::Exec {
-                    exit_code: outcome.exit_code,
-                    duration_ms: outcome.duration_ms,
-                    stdout: outcome.stdout,
-                    stderr: outcome.stderr,
-                },
-                Err(err) => ProxyResponse::Error {
-                    message: err.to_string(),
-                },
-            },
+                    Err(err) => ProxyResponse::Error {
+                        message: err.to_string(),
+                    },
+                }
+            }
             Ok(ProxyRequest::Read { path }) => {
                 match client.read_file(&sandbox_id, path.clone()).await {
                     Ok(bytes) => ProxyResponse::Read {
@@ -2657,15 +2680,7 @@ async fn bench_remote(
 
     for i in 0..(warmup + runs) {
         let sandbox = client.create_sandbox(config.clone()).await?;
-        let outcome = client
-            .exec(
-                &sandbox.id,
-                ExecRequest {
-                    command: vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.clone()],
-                    timeout_secs: 60,
-                },
-            )
-            .await?;
+        let outcome = run_sync_in_sandbox(&mut client, &sandbox.id, cmd.clone(), 60).await?;
         client.destroy_sandbox(&sandbox.id).await?;
         if i >= warmup {
             samples.push(outcome.duration_ms);
@@ -2714,15 +2729,13 @@ async fn bench_snapshot_remote(
             created_sandbox_id = Some(created_sandbox.id.clone());
 
             let mutate_started = Instant::now();
-            let mutate_outcome = client
-                .exec(
-                    &created_sandbox.id,
-                    ExecRequest {
-                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), mutate_cmd.clone()],
-                        timeout_secs,
-                    },
-                )
-                .await?;
+            let mutate_outcome = run_sync_in_sandbox(
+                &mut client,
+                &created_sandbox.id,
+                mutate_cmd.clone(),
+                timeout_secs,
+            )
+            .await?;
             if mutate_outcome.exit_code != 0 {
                 bail!(
                     "snapshot benchmark mutate command failed (run={} sandbox_id={} exit={}): {}",
@@ -2748,15 +2761,13 @@ async fn bench_snapshot_remote(
             let restore_verify_started = Instant::now();
             let (restored_sandbox, _) = client.resolve_affinity(&affinity_name, true).await?;
             restored_sandbox_id = Some(restored_sandbox.id.clone());
-            let verify_outcome = client
-                .exec(
-                    &restored_sandbox.id,
-                    ExecRequest {
-                        command: vec!["/bin/sh".to_string(), "-lc".to_string(), verify_cmd.clone()],
-                        timeout_secs,
-                    },
-                )
-                .await?;
+            let verify_outcome = run_sync_in_sandbox(
+                &mut client,
+                &restored_sandbox.id,
+                verify_cmd.clone(),
+                timeout_secs,
+            )
+            .await?;
             if verify_outcome.exit_code != 0 {
                 bail!(
                     "snapshot benchmark verify command failed (run={} sandbox_id={} exit={}): {}",

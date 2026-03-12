@@ -2,8 +2,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use hyperbox_core::{
-    ExecRequest, FilePayload, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo,
-    ProcessLogRead, SandboxConfig, SandboxId, SnapshotId, StreamName,
+    FilePayload, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, ProcessLogRead,
+    SandboxConfig, SandboxId, SnapshotId, StreamName,
 };
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_server::HyperboxControl};
 
@@ -473,51 +473,6 @@ impl HyperboxControl for GrpcControlService {
             })
             .collect();
         Ok(Response::new(pb::ListSandboxesResponse { sandboxes }))
-    }
-
-    async fn exec(
-        &self,
-        request: Request<pb::ExecRequest>,
-    ) -> Result<Response<pb::ExecResponse>, Status> {
-        let peer = request.remote_addr();
-        let request = request.into_inner();
-        let sandbox_id = parse_sandbox_id(&request.sandbox_id)?;
-        let command_preview = request.command.join(" ");
-        info!(
-            peer = ?peer,
-            sandbox_id = %sandbox_id.0,
-            timeout_secs = request.timeout_secs,
-            command = %command_preview,
-            "grpc exec request"
-        );
-        let outcome = self
-            .runtime
-            .exec(
-                &sandbox_id,
-                ExecRequest {
-                    command: request.command,
-                    timeout_secs: request.timeout_secs.max(1),
-                },
-            )
-            .await
-            .map_err(|e| {
-                error!(peer = ?peer, sandbox_id = %sandbox_id.0, error = %e, "grpc exec failed");
-                Status::internal(e.to_string())
-            })?;
-        info!(
-            peer = ?peer,
-            sandbox_id = %sandbox_id.0,
-            exit_code = outcome.exit_code,
-            duration_ms = outcome.duration_ms,
-            "grpc exec success"
-        );
-
-        Ok(Response::new(pb::ExecResponse {
-            exit_code: outcome.exit_code,
-            stdout: outcome.stdout,
-            stderr: outcome.stderr,
-            duration_ms: outcome.duration_ms as u64,
-        }))
     }
 
     async fn read_file(

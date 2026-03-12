@@ -94,11 +94,6 @@ class HyperboxControlStub(object):
                 request_serializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessRequest.SerializeToString,
                 response_deserializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessResponse.FromString,
                 _registered_method=True)
-        self.Exec = channel.unary_unary(
-                '/hyperbox.v1.HyperboxControl/Exec',
-                request_serializer=hyperbox_dot_v1_dot_control__pb2.ExecRequest.SerializeToString,
-                response_deserializer=hyperbox_dot_v1_dot_control__pb2.ExecResponse.FromString,
-                _registered_method=True)
         self.ReadFile = channel.unary_unary(
                 '/hyperbox.v1.HyperboxControl/ReadFile',
                 request_serializer=hyperbox_dot_v1_dot_control__pb2.ReadFileRequest.SerializeToString,
@@ -221,12 +216,6 @@ class HyperboxControlServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Exec(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
     def ReadFile(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -343,11 +332,6 @@ def add_HyperboxControlServicer_to_server(servicer, server):
                     servicer.CancelProcess,
                     request_deserializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessRequest.FromString,
                     response_serializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessResponse.SerializeToString,
-            ),
-            'Exec': grpc.unary_unary_rpc_method_handler(
-                    servicer.Exec,
-                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.ExecRequest.FromString,
-                    response_serializer=hyperbox_dot_v1_dot_control__pb2.ExecResponse.SerializeToString,
             ),
             'ReadFile': grpc.unary_unary_rpc_method_handler(
                     servicer.ReadFile,
@@ -719,33 +703,6 @@ class HyperboxControl(object):
             '/hyperbox.v1.HyperboxControl/CancelProcess',
             hyperbox_dot_v1_dot_control__pb2.CancelProcessRequest.SerializeToString,
             hyperbox_dot_v1_dot_control__pb2.CancelProcessResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def Exec(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/hyperbox.v1.HyperboxControl/Exec',
-            hyperbox_dot_v1_dot_control__pb2.ExecRequest.SerializeToString,
-            hyperbox_dot_v1_dot_control__pb2.ExecResponse.FromString,
             options,
             channel_credentials,
             insecure,

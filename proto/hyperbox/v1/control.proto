@@ -321,7 +321,6 @@ service HyperboxControl {
   rpc ReadProcessLog(ReadProcessLogRequest) returns (ReadProcessLogResponse);
   rpc WaitProcess(WaitProcessRequest) returns (WaitProcessResponse);
   rpc CancelProcess(CancelProcessRequest) returns (CancelProcessResponse);
-  rpc Exec(ExecRequest) returns (ExecResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
