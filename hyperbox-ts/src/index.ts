@@ -1,15 +1,5 @@
-import grpc from "@grpc/grpc-js";
-import protoLoader from "@grpc/proto-loader";
-import { join } from "node:path";
-
-const PROTO_PATH = join(
-  import.meta.dirname,
-  "..",
-  "proto",
-  "hyperbox",
-  "v1",
-  "control.proto",
-);
+import type { ControlClient, RpcMethod } from "./grpc.js";
+import { loadControlClient } from "./grpc.js";
 
 const NETWORK_MODE_NONE = 1;
 const NETWORK_MODE_ALLOWLIST = 2;
@@ -143,11 +133,6 @@ export interface RunResult extends StartedRun {
 }
 
 type RpcRequest = Record<string, unknown>;
-type RpcCallback<T> = (err: grpc.ServiceError | null, response?: T) => void;
-type RpcMethod<TRequest extends RpcRequest, TResponse> = (
-  request: TRequest,
-  callback: RpcCallback<TResponse>,
-) => void;
 
 type RawSandboxInfo = {
   id: string;
@@ -186,29 +171,6 @@ type RawProcessInfo = {
   finished_at: string;
   expires_at: string;
 };
-
-type ControlClient = grpc.Client & Record<string, RpcMethod<RpcRequest, unknown>>;
-
-function loadControlClient(target: string): ControlClient {
-  const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
-    keepCase: true,
-    longs: String,
-    enums: String,
-    defaults: true,
-    oneofs: true,
-  });
-  const loaded = grpc.loadPackageDefinition(packageDefinition) as {
-    hyperbox: {
-      v1: {
-        HyperboxControl: grpc.ServiceClientConstructor;
-      };
-    };
-  };
-  return new loaded.hyperbox.v1.HyperboxControl(
-    target,
-    grpc.credentials.createInsecure(),
-  ) as ControlClient;
-}
 
 function requireField<T>(value: T | undefined | null, name: string): T {
   if (value === undefined || value === null) {

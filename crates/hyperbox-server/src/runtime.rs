@@ -366,7 +366,8 @@ impl HyperboxServer {
         timeout_secs: u64,
     ) -> Result<ProcessInfo> {
         self.ensure_hydrated().await?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_secs(timeout_secs.max(1));
         loop {
             let process = self.get_process(process_id).await?;
             if process.status.is_terminal() {
@@ -378,7 +379,7 @@ impl HyperboxServer {
                     process_id.0
                 )));
             }
-            sleep(Duration::from_millis(100)).await;
+            sleep(process_wait_poll_interval(started.elapsed())).await;
         }
     }
 
@@ -1001,6 +1002,14 @@ fn process_lost_grace() -> ChronoDuration {
     ChronoDuration::seconds(5)
 }
 
+fn process_wait_poll_interval(elapsed: Duration) -> Duration {
+    if elapsed < Duration::from_secs(1) {
+        Duration::from_millis(25)
+    } else {
+        Duration::from_millis(100)
+    }
+}
+
 fn process_launch_command(process: &ProcessInfo) -> Result<String> {
     let base = process_dir(&process.id);
     let command = shell_join(&process.command);
@@ -1018,14 +1027,14 @@ fn process_launch_command(process: &ProcessInfo) -> Result<String> {
 fn inspect_script(process: &ProcessInfo) -> String {
     let base = shell_escape(process_dir(&process.id).as_str());
     format!(
-        "base={base}; if [ -f \"$base/exit_code\" ]; then code=$(cat \"$base/exit_code\"); if [ -f \"$base/cancelled\" ]; then printf 'cancelled:%s' \"$code\"; elif [ \"$code\" = '0' ]; then printf 'succeeded:%s' \"$code\"; else printf 'failed:%s' \"$code\"; fi; elif [ -f \"$base/pid\" ]; then pid=$(cat \"$base/pid\"); if kill -0 \"$pid\" 2>/dev/null; then printf 'running:%s' \"$pid\"; elif [ -f \"$base/cancelled\" ]; then printf 'cancelled:'; else printf 'lost'; fi; else printf 'starting'; fi",
+        "base={base}; if [ -f \"$base/exit_code\" ]; then code=''; IFS= read -r code < \"$base/exit_code\" || [ -n \"$code\" ]; if [ -f \"$base/cancelled\" ]; then printf 'cancelled:%s' \"$code\"; elif [ \"$code\" = '0' ]; then printf 'succeeded:%s' \"$code\"; else printf 'failed:%s' \"$code\"; fi; elif [ -f \"$base/pid\" ]; then pid=''; IFS= read -r pid < \"$base/pid\" || [ -n \"$pid\" ]; if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then printf 'running:%s' \"$pid\"; elif [ -f \"$base/cancelled\" ]; then printf 'cancelled:'; else printf 'lost'; fi; else printf 'starting'; fi",
     )
 }
 
 fn cancel_script(process: &ProcessInfo) -> String {
     let pid_path = shell_escape(&process_pid_path(&process.id));
     format!(
-        "pid_file={pid_path}; if [ ! -f \"$pid_file\" ]; then exit 0; fi; pid=$(cat \"$pid_file\"); \
+        "pid_file={pid_path}; if [ ! -f \"$pid_file\" ]; then exit 0; fi; pid=''; IFS= read -r pid < \"$pid_file\" || [ -n \"$pid\" ] || exit 0; \
          kill_descendants() {{ target=\"$1\"; if command -v pgrep >/dev/null 2>&1; then for child in $(pgrep -P \"$target\" 2>/dev/null || true); do kill_descendants \"$child\"; done; fi; kill -TERM \"$target\" 2>/dev/null || true; }}; \
          kill_descendants_kill() {{ target=\"$1\"; if command -v pgrep >/dev/null 2>&1; then for child in $(pgrep -P \"$target\" 2>/dev/null || true); do kill_descendants_kill \"$child\"; done; fi; kill -KILL \"$target\" 2>/dev/null || true; }}; \
          kill_descendants \"$pid\"; sleep 1; if kill -0 \"$pid\" 2>/dev/null; then kill_descendants_kill \"$pid\"; fi",
@@ -1478,6 +1487,37 @@ mod tests {
     }
 
     #[test]
+    fn process_probe_scripts_use_shell_builtins_for_metadata_reads() {
+        let process_id = ProcessId::new();
+        let process = ProcessInfo {
+            id: process_id.clone(),
+            sandbox_id: SandboxId::new(),
+            requested_sandbox_id: None,
+            disposition: ProcessDisposition::ReusedExisting,
+            destroy_sandbox_on_expiry: false,
+            command: vec!["sleep".to_string(), "1".to_string()],
+            status: ProcessStatus::Running,
+            stdout_path: process_stdout_path(&process_id),
+            stderr_path: process_stderr_path(&process_id),
+            backend_pid: Some(42),
+            exit_code: None,
+            started_at: Utc::now(),
+            finished_at: None,
+            expires_at: None,
+        };
+
+        let inspect = inspect_script(&process);
+        assert!(inspect.contains("read -r code"));
+        assert!(inspect.contains("read -r pid"));
+        assert!(!inspect.contains("cat \"$base/exit_code\""));
+        assert!(!inspect.contains("cat \"$base/pid\""));
+
+        let cancel = cancel_script(&process);
+        assert!(cancel.contains("read -r pid"));
+        assert!(!cancel.contains("cat \"$pid_file\""));
+    }
+
+    #[test]
     fn lost_probe_stays_non_terminal_within_grace_period() {
         let now = Utc::now();
         let process = ProcessInfo {
@@ -1500,6 +1540,22 @@ mod tests {
         let parsed = parse_process_probe(&process, "lost").expect("parse lost probe");
         assert_eq!(parsed.status, ProcessStatus::Starting);
         assert!(parsed.finished_at.is_none());
+    }
+
+    #[test]
+    fn wait_process_polls_more_aggressively_for_short_lived_work() {
+        assert_eq!(
+            process_wait_poll_interval(Duration::from_millis(0)),
+            Duration::from_millis(25)
+        );
+        assert_eq!(
+            process_wait_poll_interval(Duration::from_millis(999)),
+            Duration::from_millis(25)
+        );
+        assert_eq!(
+            process_wait_poll_interval(Duration::from_secs(1)),
+            Duration::from_millis(100)
+        );
     }
 
     #[tokio::test]
