@@ -1047,6 +1047,8 @@ impl HelperNetworkMode {
                 let setup = allowlist_setup.context("allowlist networking runtime is missing")?;
                 Ok(vec![
                     "--network".to_string(),
+                    "default".to_string(),
+                    "--network".to_string(),
                     setup.network_name.clone(),
                     "--dns".to_string(),
                     setup.dns_server_ip.clone(),
@@ -1190,6 +1192,8 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--network".to_string(),
+                "default".to_string(),
                 "--network".to_string(),
                 "hyperbox-net-test".to_string(),
                 "--dns".to_string(),
