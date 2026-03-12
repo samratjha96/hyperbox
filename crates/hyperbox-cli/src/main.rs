@@ -1692,6 +1692,7 @@ async fn run_remote_with_client(
     let op_started = Instant::now();
     let create_started = Instant::now();
     let sandbox = client.create_sandbox(config).await?;
+    let skip_destroy = detach;
     info!(
         sandbox_id = %sandbox.id.0,
         stage = "create",
@@ -1735,27 +1736,29 @@ async fn run_remote_with_client(
     }
     .await;
 
-    let destroy_started = Instant::now();
-    let destroy_result = client.destroy_sandbox(&sandbox.id).await;
-    if let Err(err) = destroy_result {
-        warn!(
+    if !skip_destroy {
+        let destroy_started = Instant::now();
+        let destroy_result = client.destroy_sandbox(&sandbox.id).await;
+        if let Err(err) = destroy_result {
+            warn!(
+                sandbox_id = %sandbox.id.0,
+                stage = "destroy",
+                elapsed_ms = destroy_started.elapsed().as_millis() as u64,
+                error = %err,
+                "run command sandbox destroy failed"
+            );
+            if run_result.is_ok() {
+                return Err(err);
+            }
+        }
+        info!(
             sandbox_id = %sandbox.id.0,
             stage = "destroy",
             elapsed_ms = destroy_started.elapsed().as_millis() as u64,
-            error = %err,
-            "run command sandbox destroy failed"
+            total_elapsed_ms = op_started.elapsed().as_millis() as u64,
+            "run command sandbox destroyed"
         );
-        if run_result.is_ok() {
-            return Err(err);
-        }
     }
-    info!(
-        sandbox_id = %sandbox.id.0,
-        stage = "destroy",
-        elapsed_ms = destroy_started.elapsed().as_millis() as u64,
-        total_elapsed_ms = op_started.elapsed().as_millis() as u64,
-        "run command sandbox destroyed"
-    );
 
     let exit_code = run_result?;
     if exit_code != 0 {

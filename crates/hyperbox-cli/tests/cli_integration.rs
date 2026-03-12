@@ -281,6 +281,53 @@ fn detached_run_can_be_waited_and_logged() {
 }
 
 #[test]
+fn detached_ephemeral_run_can_be_waited_and_logged() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let started = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "run",
+            "--ephemeral",
+            "--template",
+            "python:3.12",
+            "--cmd",
+            "printf detached-ephemeral",
+            "--detach",
+            "--json",
+        ])
+        .output()
+        .expect("start detached ephemeral process");
+    assert!(started.status.success());
+    let started_stdout = String::from_utf8_lossy(&started.stdout);
+    let process_id = started_stdout
+        .split("\"process_id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("extract process id")
+        .to_string();
+
+    let waited = Command::new(hyperbox_bin())
+        .args(["--server-url", &url, "wait", &process_id, "--json"])
+        .output()
+        .expect("wait process");
+
+    let logs = Command::new(hyperbox_bin())
+        .args(["--server-url", &url, "logs", &process_id])
+        .output()
+        .expect("read process logs");
+
+    let _ = server.kill();
+    assert!(waited.status.success());
+    assert!(String::from_utf8_lossy(&waited.stdout).contains("succeeded"));
+    assert!(logs.status.success());
+    assert!(String::from_utf8_lossy(&logs.stdout).contains("detached-ephemeral"));
+}
+
+#[test]
 fn run_creates_new_sandbox_when_target_is_busy() {
     let Some((mut server, url)) = spawn_server() else {
         return;

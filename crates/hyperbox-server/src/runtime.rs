@@ -740,7 +740,7 @@ fn process_launch_script(process: &ProcessInfo) -> Result<String> {
         "#!/bin/sh\nset -eu\nbase={base}\nmkdir -p \"$base\"\n: > \"$base/stdout.log\"\n: > \"$base/stderr.log\"\nrm -f \"$base/exit_code\" \"$base/pid\" \"$base/cancelled\"\nnohup /bin/sh -lc {wrapped} >> \"$base/stdout.log\" 2>> \"$base/stderr.log\" </dev/null &\npid=$!\nprintf \"%s\" \"$pid\" > \"$base/pid\"\n",
         base = shell_escape(&base),
         wrapped = shell_escape(&format!(
-            "{command}; code=$?; printf '%s' \"$code\" > {exit_path}; exit \"$code\"",
+            "export PYTHONUNBUFFERED=1; {command}; code=$?; printf '%s' \"$code\" > {exit_path}; exit \"$code\"",
             command = command,
             exit_path = shell_escape(&process_exit_code_path(&process.id)),
         )),
@@ -841,13 +841,21 @@ mod tests {
     use super::*;
     use crate::LocalBackend;
     use hyperbox_core::{ProcessDisposition, ProcessStatus, StreamName};
-    use std::sync::Arc;
+    use std::{path::PathBuf, sync::Arc};
+
+    fn unique_test_root(name: &str) -> PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{suffix}"))
+    }
 
     #[tokio::test]
     async fn server_lifecycle_works() {
-        let backend = Arc::new(LocalBackend::new(Some(
-            std::env::temp_dir().join("hyperbox-server-lifecycle-test"),
-        )));
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-lifecycle-test",
+        ))));
         let server = HyperboxServer::new(backend);
 
         let info = server
@@ -883,9 +891,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_sandboxes_returns_active_sandbox_ids() {
-        let backend = Arc::new(LocalBackend::new(Some(
-            std::env::temp_dir().join("hyperbox-server-list-test"),
-        )));
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-list-test",
+        ))));
         let server = HyperboxServer::new(backend);
 
         let info = server
@@ -906,9 +914,9 @@ mod tests {
 
     #[tokio::test]
     async fn restore_snapshot_fails_when_artifact_is_missing() {
-        let backend = Arc::new(LocalBackend::new(Some(
-            std::env::temp_dir().join("hyperbox-server-restore-missing-artifact"),
-        )));
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-restore-missing-artifact",
+        ))));
         let snapshots = Arc::new(crate::InMemorySnapshotStore::default());
         let server = HyperboxServer::new_with_snapshots(backend, snapshots.clone());
 
@@ -934,9 +942,9 @@ mod tests {
 
     #[tokio::test]
     async fn managed_process_runs_and_persists_logs() {
-        let backend = Arc::new(LocalBackend::new(Some(
-            std::env::temp_dir().join("hyperbox-server-process-run-test"),
-        )));
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-run-test",
+        ))));
         let server = HyperboxServer::new(backend);
 
         let sandbox = server
@@ -979,10 +987,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_process_exposes_logs_while_running() {
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-live-log-test",
+        ))));
+        let server = HyperboxServer::new(backend);
+
+        let sandbox = server
+            .create_sandbox(SandboxConfig::default())
+            .await
+            .expect("create sandbox");
+
+        let process = server
+            .start_process(
+                &sandbox.id,
+                vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "python3 -c 'import time; print(\"start\"); time.sleep(1); print(\"done\")'"
+                        .to_string(),
+                ],
+                None,
+                ProcessDisposition::ReusedExisting,
+            )
+            .await
+            .expect("start process");
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let stdout = server
+            .read_process_log(&process.id, StreamName::Stdout, 0, 1024)
+            .await
+            .expect("read stdout while running");
+        assert!(
+            stdout.contents.contains("start"),
+            "stdout should be visible before process exit, got {:?}",
+            stdout.contents
+        );
+
+        let completed = server
+            .wait_process(&process.id, 5)
+            .await
+            .expect("wait process");
+        assert_eq!(completed.status, ProcessStatus::Succeeded);
+    }
+
+    #[tokio::test]
     async fn managed_process_rejects_second_process_in_same_sandbox() {
-        let backend = Arc::new(LocalBackend::new(Some(
-            std::env::temp_dir().join("hyperbox-server-process-busy-test"),
-        )));
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-busy-test",
+        ))));
         let server = HyperboxServer::new(backend);
 
         let sandbox = server
@@ -1026,9 +1080,9 @@ mod tests {
 
     #[tokio::test]
     async fn managed_process_can_be_cancelled() {
-        let backend = Arc::new(LocalBackend::new(Some(
-            std::env::temp_dir().join("hyperbox-server-process-cancel-test"),
-        )));
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-cancel-test",
+        ))));
         let server = HyperboxServer::new(backend);
 
         let sandbox = server
