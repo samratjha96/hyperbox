@@ -262,6 +262,20 @@ console.log(result.status, result.stdout);
 await client.close();
 ```
 
+Python example:
+
+```python
+from hyperbox import HyperboxClient
+
+with HyperboxClient("127.0.0.1:50051") as client:
+    result = client.run(
+        template="python:3.12",
+        command="python3 -c 'print(6 * 7)'",
+        ephemeral=True,
+    )
+    print(result.process.status, result.stdout)
+```
+
 ## Performance and Benchmarks
 
 Benchmark tooling and historical reports are included in the repository. Treat reported numbers as environment-specific baselines and rerun benchmarks in your own setup before making decisions.

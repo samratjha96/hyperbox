@@ -104,6 +104,7 @@ $HB probe
 - TypeScript SDK: `hyperbox-ts`
 
 Both speak to the same gRPC control plane as the CLI and use the same managed-process model.
+The high-level SDK entrypoint is `run(...)`; detached work uses `start_run(...)`, `wait_process(...)`, `read_process_log(...)`, and `cancel_process(...)`.
 
 ## Notes
 
