@@ -29,6 +29,13 @@ pub struct ActiveSandboxInfo {
     pub affinity_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedRunSandbox {
+    pub info: SandboxInfo,
+    pub requested_sandbox_id: Option<SandboxId>,
+    pub disposition: ProcessDisposition,
+}
+
 impl HyperboxServer {
     pub fn new(backend: Arc<dyn SandboxBackend>) -> Self {
         if cfg!(test) {
@@ -434,6 +441,46 @@ impl HyperboxServer {
         }
         rows.sort_by(|a, b| a.info.created_at.cmp(&b.info.created_at));
         rows
+    }
+
+    pub async fn prepare_run_sandbox(
+        &self,
+        sandbox_id: &SandboxId,
+        overflow_config: Option<SandboxConfig>,
+    ) -> Result<PreparedRunSandbox> {
+        self.ensure_hydrated().await?;
+        self.cleanup_expired_processes().await?;
+
+        if self.active_process_for_sandbox(sandbox_id).await?.is_none() {
+            return Ok(PreparedRunSandbox {
+                info: self.inspect(sandbox_id).await?,
+                requested_sandbox_id: None,
+                disposition: ProcessDisposition::ReusedExisting,
+            });
+        }
+
+        let Some(mut overflow_config) = overflow_config else {
+            let existing = self
+                .active_process_for_sandbox(sandbox_id)
+                .await?
+                .ok_or_else(|| {
+                    HyperboxError::ExecutionFailed(format!(
+                        "sandbox {} became idle while preparing run target",
+                        sandbox_id.0
+                    ))
+                })?;
+            return Err(HyperboxError::ExecutionFailed(format!(
+                "sandbox {} already has a running managed process ({})",
+                sandbox_id.0, existing.id.0
+            )));
+        };
+        overflow_config.affinity_name = None;
+        let info = self.create_sandbox(overflow_config).await?;
+        Ok(PreparedRunSandbox {
+            info,
+            requested_sandbox_id: Some(sandbox_id.clone()),
+            disposition: ProcessDisposition::CreatedDueToBusy,
+        })
     }
 
     pub async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload> {
@@ -1110,5 +1157,44 @@ mod tests {
             .expect("cancel process");
         assert_eq!(cancelled.status, ProcessStatus::Cancelled);
         assert!(cancelled.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn prepare_run_sandbox_overflows_to_new_sandbox_when_busy() {
+        let backend = Arc::new(LocalBackend::new(Some(unique_test_root(
+            "hyperbox-server-process-overflow-test",
+        ))));
+        let server = HyperboxServer::new(backend);
+
+        let sandbox = server
+            .create_sandbox(SandboxConfig {
+                affinity_name: Some("overflow-test".to_string()),
+                ..SandboxConfig::default()
+            })
+            .await
+            .expect("create sandbox");
+
+        let first = server
+            .start_process(
+                &sandbox.id,
+                vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "sleep 2".to_string(),
+                ],
+                None,
+                ProcessDisposition::ReusedExisting,
+            )
+            .await
+            .expect("start first process");
+        assert_eq!(first.status, ProcessStatus::Running);
+
+        let prepared = server
+            .prepare_run_sandbox(&sandbox.id, Some(SandboxConfig::default()))
+            .await
+            .expect("busy sandbox should overflow");
+        assert_eq!(prepared.disposition, ProcessDisposition::CreatedDueToBusy);
+        assert_eq!(prepared.requested_sandbox_id, Some(sandbox.id.clone()));
+        assert_ne!(prepared.info.id, sandbox.id);
     }
 }

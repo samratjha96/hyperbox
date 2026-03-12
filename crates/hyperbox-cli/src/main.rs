@@ -554,9 +554,9 @@ async fn main() -> anyhow::Result<()> {
             if let Some(sandbox_id) = sandbox_id {
                 let parsed_sandbox_id = parse_sandbox_id(&sandbox_id)?;
                 let details = client.inspect_sandbox_details(&parsed_sandbox_id).await?;
-                let (target_sandbox_id, overflowed) =
-                    select_run_sandbox(&mut client, parsed_sandbox_id, Some(details.config))
-                        .await?;
+                let prepared = client
+                    .prepare_run_sandbox(&parsed_sandbox_id, Some(details.config))
+                    .await?;
                 let summary = build_effective_isolation_summary(
                     server_info.as_ref(),
                     None,
@@ -565,15 +565,9 @@ async fn main() -> anyhow::Result<()> {
                     timeout,
                 );
                 print_effective_isolation_summary(&summary, explain_details.as_ref())?;
-                if overflowed {
-                    eprintln!(
-                        "requested sandbox was busy; created a new sandbox {} for this run",
-                        target_sandbox_id.0
-                    );
-                }
                 run_existing_with_client(
                     &mut client,
-                    target_sandbox_id,
+                    prepared,
                     ensure,
                     cmd,
                     timeout,
@@ -596,8 +590,9 @@ async fn main() -> anyhow::Result<()> {
                     "resolved affinity for run command"
                 );
                 let details = client.inspect_sandbox_details(&info.id).await?;
-                let (target_sandbox_id, overflowed) =
-                    select_run_sandbox(&mut client, info.id, Some(details.config)).await?;
+                let prepared = client
+                    .prepare_run_sandbox(&info.id, Some(details.config))
+                    .await?;
                 let summary = build_effective_isolation_summary(
                     server_info.as_ref(),
                     None,
@@ -606,15 +601,9 @@ async fn main() -> anyhow::Result<()> {
                     timeout,
                 );
                 print_effective_isolation_summary(&summary, explain_details.as_ref())?;
-                if overflowed {
-                    eprintln!(
-                        "requested sandbox was busy; created a new sandbox {} for this run",
-                        target_sandbox_id.0
-                    );
-                }
                 run_existing_with_client(
                     &mut client,
-                    target_sandbox_id,
+                    prepared,
                     ensure,
                     cmd,
                     timeout,
@@ -679,17 +668,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let mut overflow_config = client.inspect_sandbox_details(&session_id).await?.config;
                 overflow_config.affinity_name = None;
-                let (target_sandbox_id, overflowed) =
-                    select_run_sandbox(&mut client, session_id, Some(overflow_config)).await?;
-                if overflowed {
-                    eprintln!(
-                        "session `{session_name}` was busy; created a new sandbox {} for this run",
-                        target_sandbox_id.0
-                    );
-                }
+                let prepared = client
+                    .prepare_run_sandbox(&session_id, Some(overflow_config))
+                    .await?;
                 run_existing_with_client(
                     &mut client,
-                    target_sandbox_id,
+                    prepared,
                     ensure,
                     cmd,
                     timeout,
@@ -1653,29 +1637,6 @@ fn print_effective_isolation_summary(
     Ok(())
 }
 
-async fn select_run_sandbox(
-    client: &mut GrpcControlClient,
-    sandbox_id: SandboxId,
-    overflow_config: Option<SandboxConfig>,
-) -> anyhow::Result<(SandboxId, bool)> {
-    let processes = client.list_processes().await?;
-    let busy = processes
-        .iter()
-        .any(|process| process.sandbox_id == sandbox_id && !process.status.is_terminal());
-    if !busy {
-        return Ok((sandbox_id, false));
-    }
-
-    let mut config = overflow_config.ok_or_else(|| {
-        anyhow::anyhow!(
-            "sandbox is busy and no overflow config is available to create a new sandbox"
-        )
-    })?;
-    config.affinity_name = None;
-    let created = client.create_sandbox(config).await?;
-    Ok((created.id, true))
-}
-
 async fn run_remote_with_client(
     client: &mut GrpcControlClient,
     config: SandboxConfig,
@@ -1712,7 +1673,14 @@ async fn run_remote_with_client(
 
         run_ensure_commands_with_client(client, &sandbox.id, &ensure_commands, timeout).await?;
 
-        let process = start_shell_command_with_client(client, &sandbox.id, &cmd).await?;
+        let process = start_shell_command_with_client(
+            client,
+            &sandbox.id,
+            None,
+            ProcessDisposition::CreatedNew,
+            &cmd,
+        )
+        .await?;
         if detach {
             emit_process_start(&process, json, effective_isolation, explain)?;
             return Ok(0);
@@ -1769,7 +1737,7 @@ async fn run_remote_with_client(
 
 async fn run_existing_with_client(
     client: &mut GrpcControlClient,
-    sandbox_id: SandboxId,
+    prepared: hyperbox_server::PreparedRunSandbox,
     ensure_commands: Vec<String>,
     cmd: String,
     timeout: u64,
@@ -1780,6 +1748,7 @@ async fn run_existing_with_client(
     effective_isolation: Option<&EffectiveIsolationSummary>,
     explain: Option<&ExplainDetails>,
 ) -> anyhow::Result<()> {
+    let sandbox_id = prepared.info.id.clone();
     for entry in writes {
         let (path, content) = entry
             .split_once('=')
@@ -1791,7 +1760,15 @@ async fn run_existing_with_client(
 
     run_ensure_commands_with_client(client, &sandbox_id, &ensure_commands, timeout).await?;
 
-    let process = start_shell_command_with_client(client, &sandbox_id, &cmd).await?;
+    let process = start_shell_command_with_client(
+        client,
+        &sandbox_id,
+        prepared.requested_sandbox_id.clone(),
+        prepared.disposition,
+        &cmd,
+    )
+    .await?;
+    maybe_print_overflow_notice(&process);
     if detach {
         emit_process_start(&process, json, effective_isolation, explain)?;
         return Ok(());
@@ -1852,17 +1829,28 @@ async fn run_ensure_commands_with_client(
     Ok(())
 }
 
+fn maybe_print_overflow_notice(process: &ProcessInfo) {
+    if process.disposition == ProcessDisposition::CreatedDueToBusy {
+        eprintln!(
+            "requested sandbox was busy; created a new sandbox {} for this run",
+            process.sandbox_id.0
+        );
+    }
+}
+
 async fn start_shell_command_with_client(
     client: &mut GrpcControlClient,
     sandbox_id: &SandboxId,
+    requested_sandbox_id: Option<SandboxId>,
+    disposition: ProcessDisposition,
     cmd: &str,
 ) -> anyhow::Result<ProcessInfo> {
     client
         .start_process(
             sandbox_id,
             vec!["/bin/sh".to_string(), "-lc".to_string(), cmd.to_string()],
-            None,
-            ProcessDisposition::ReusedExisting,
+            requested_sandbox_id,
+            disposition,
         )
         .await
 }

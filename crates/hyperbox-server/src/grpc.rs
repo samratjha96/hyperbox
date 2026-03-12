@@ -98,6 +98,19 @@ fn parse_process_disposition(raw: &str) -> Result<ProcessDisposition, Status> {
     }
 }
 
+fn into_proto_prepared_run_sandbox(
+    prepared: crate::runtime::PreparedRunSandbox,
+) -> pb::PrepareRunSandboxResponse {
+    pb::PrepareRunSandboxResponse {
+        info: Some(into_proto_info(prepared.info)),
+        requested_sandbox_id: prepared
+            .requested_sandbox_id
+            .map(|id| id.0.to_string())
+            .unwrap_or_default(),
+        disposition: format!("{:?}", prepared.disposition),
+    }
+}
+
 fn parse_stream_name(raw: &str) -> Result<StreamName, Status> {
     match raw {
         "stdout" | "Stdout" => Ok(StreamName::Stdout),
@@ -214,6 +227,24 @@ impl HyperboxControl for GrpcControlService {
         Ok(Response::new(pb::StartProcessResponse {
             process: Some(into_proto_process(process)),
         }))
+    }
+
+    async fn prepare_run_sandbox(
+        &self,
+        request: Request<pb::PrepareRunSandboxRequest>,
+    ) -> Result<Response<pb::PrepareRunSandboxResponse>, Status> {
+        let peer = request.remote_addr();
+        let request = request.into_inner();
+        let sandbox_id = parse_sandbox_id(&request.sandbox_id)?;
+        let prepared = self
+            .runtime
+            .prepare_run_sandbox(&sandbox_id, request.overflow_config.map(from_proto_config))
+            .await
+            .map_err(|e| {
+                error!(peer = ?peer, sandbox_id = %sandbox_id.0, error = %e, "grpc prepare_run_sandbox failed");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(into_proto_prepared_run_sandbox(prepared)))
     }
 
     async fn get_process(

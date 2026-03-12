@@ -138,3 +138,57 @@ async fn grpc_managed_process_lifecycle() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn grpc_prepare_run_sandbox_overflows_when_busy() {
+    unsafe { std::env::set_var("HYPERBOX_BACKEND", "local") };
+
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind ephemeral port: {err}"),
+    };
+    let addr = listener.local_addr().expect("read local addr");
+    drop(listener);
+
+    let server = tokio::spawn(async move {
+        serve_grpc(addr).await.expect("serve grpc");
+    });
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let endpoint = format!("http://{}", addr);
+    let mut client = GrpcControlClient::connect(endpoint)
+        .await
+        .expect("connect grpc client");
+
+    let sandbox = client
+        .create_sandbox(SandboxConfig::default())
+        .await
+        .expect("create sandbox");
+
+    let first = client
+        .start_process(
+            &sandbox.id,
+            vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "sleep 2".to_string(),
+            ],
+            None,
+            ProcessDisposition::ReusedExisting,
+        )
+        .await
+        .expect("start first process");
+    assert_eq!(first.status, ProcessStatus::Running);
+
+    let prepared = client
+        .prepare_run_sandbox(&sandbox.id, Some(SandboxConfig::default()))
+        .await
+        .expect("prepare overflow sandbox");
+    assert_eq!(prepared.disposition, ProcessDisposition::CreatedDueToBusy);
+    assert_eq!(prepared.requested_sandbox_id, Some(sandbox.id.clone()));
+    assert_ne!(prepared.info.id, sandbox.id);
+
+    server.abort();
+}

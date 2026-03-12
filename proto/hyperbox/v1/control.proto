@@ -184,6 +184,17 @@ message ProcessInfo {
   string expires_at = 15;
 }
 
+message PrepareRunSandboxRequest {
+  string sandbox_id = 1;
+  SandboxConfig overflow_config = 2;
+}
+
+message PrepareRunSandboxResponse {
+  SandboxInfo info = 1;
+  string requested_sandbox_id = 2;
+  string disposition = 3;
+}
+
 message StartProcessRequest {
   string sandbox_id = 1;
   repeated string command = 2;
@@ -277,6 +288,7 @@ service HyperboxControl {
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
   rpc InspectSandbox(InspectSandboxRequest) returns (InspectSandboxResponse);
   rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc PrepareRunSandbox(PrepareRunSandboxRequest) returns (PrepareRunSandboxResponse);
   rpc StartProcess(StartProcessRequest) returns (StartProcessResponse);
   rpc GetProcess(GetProcessRequest) returns (GetProcessResponse);
   rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);

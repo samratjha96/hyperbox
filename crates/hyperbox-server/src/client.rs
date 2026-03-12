@@ -35,6 +35,49 @@ pub struct SandboxDetails {
     pub config: SandboxConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedRunSandbox {
+    pub info: SandboxInfo,
+    pub requested_sandbox_id: Option<hyperbox_core::SandboxId>,
+    pub disposition: ProcessDisposition,
+}
+
+fn parse_sandbox_info(info: pb::SandboxInfo) -> anyhow::Result<SandboxInfo> {
+    Ok(SandboxInfo {
+        id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
+        template: info.template,
+        state: match info.state.as_str() {
+            "Provisioning" => hyperbox_core::SandboxState::Provisioning,
+            "Busy" => hyperbox_core::SandboxState::Busy,
+            "Stopped" => hyperbox_core::SandboxState::Stopped,
+            "Failed" => hyperbox_core::SandboxState::Failed,
+            _ => hyperbox_core::SandboxState::Ready,
+        },
+        created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
+            .with_timezone(&chrono::Utc),
+    })
+}
+
+fn into_proto_config(config: SandboxConfig) -> pb::SandboxConfig {
+    let (network_mode, network_allowlist) = match config.network {
+        NetworkMode::None => (pb::NetworkMode::None as i32, Vec::new()),
+        NetworkMode::Allowlist(domains) => (pb::NetworkMode::Allowlist as i32, domains),
+        NetworkMode::Full => (pb::NetworkMode::Full as i32, Vec::new()),
+    };
+
+    pb::SandboxConfig {
+        template: config.template,
+        memory_mb: config.memory_mb,
+        vcpu_count: config.vcpu_count as u32,
+        timeout_secs: config.timeout_secs,
+        env: config.env.into_iter().collect(),
+        network_mode,
+        network_allowlist,
+        workspace_dir: config.workspace_dir.unwrap_or_default(),
+        affinity_name: config.affinity_name.unwrap_or_default(),
+    }
+}
+
 fn parse_process_info(info: pb::ProcessInfo) -> anyhow::Result<ProcessInfo> {
     Ok(ProcessInfo {
         id: ProcessId(uuid::Uuid::parse_str(&info.process_id)?),
@@ -216,6 +259,40 @@ impl GrpcControlClient {
         )
     }
 
+    pub async fn prepare_run_sandbox(
+        &mut self,
+        sandbox_id: &hyperbox_core::SandboxId,
+        overflow_config: Option<SandboxConfig>,
+    ) -> anyhow::Result<PreparedRunSandbox> {
+        let response = self
+            .inner
+            .prepare_run_sandbox(pb::PrepareRunSandboxRequest {
+                sandbox_id: sandbox_id.0.to_string(),
+                overflow_config: overflow_config.map(into_proto_config),
+            })
+            .await?
+            .into_inner();
+        Ok(PreparedRunSandbox {
+            info: parse_sandbox_info(
+                response
+                    .info
+                    .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?,
+            )?,
+            requested_sandbox_id: if response.requested_sandbox_id.is_empty() {
+                None
+            } else {
+                Some(hyperbox_core::SandboxId(uuid::Uuid::parse_str(
+                    &response.requested_sandbox_id,
+                )?))
+            },
+            disposition: match response.disposition.as_str() {
+                "CreatedDueToBusy" => ProcessDisposition::CreatedDueToBusy,
+                "CreatedNew" => ProcessDisposition::CreatedNew,
+                _ => ProcessDisposition::ReusedExisting,
+            },
+        })
+    }
+
     pub async fn get_process(&mut self, process_id: &ProcessId) -> anyhow::Result<ProcessInfo> {
         let response = self
             .inner
@@ -349,19 +426,7 @@ impl GrpcControlClient {
             .ok_or_else(|| anyhow::anyhow!("missing sandbox config"))?;
 
         Ok(SandboxDetails {
-            info: SandboxInfo {
-                id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
-                template: info.template,
-                state: match info.state.as_str() {
-                    "Provisioning" => hyperbox_core::SandboxState::Provisioning,
-                    "Busy" => hyperbox_core::SandboxState::Busy,
-                    "Stopped" => hyperbox_core::SandboxState::Stopped,
-                    "Failed" => hyperbox_core::SandboxState::Failed,
-                    _ => hyperbox_core::SandboxState::Ready,
-                },
-                created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
-                    .with_timezone(&chrono::Utc),
-            },
+            info: parse_sandbox_info(info)?,
             config: SandboxConfig {
                 affinity_name: if config.affinity_name.is_empty() {
                     None
@@ -403,19 +468,7 @@ impl GrpcControlClient {
                     .info
                     .ok_or_else(|| anyhow::anyhow!("missing sandbox info"))?;
                 Ok(ActiveSandboxInfo {
-                    info: SandboxInfo {
-                        id: hyperbox_core::SandboxId(uuid::Uuid::parse_str(&info.id)?),
-                        template: info.template,
-                        state: match info.state.as_str() {
-                            "Provisioning" => hyperbox_core::SandboxState::Provisioning,
-                            "Busy" => hyperbox_core::SandboxState::Busy,
-                            "Stopped" => hyperbox_core::SandboxState::Stopped,
-                            "Failed" => hyperbox_core::SandboxState::Failed,
-                            _ => hyperbox_core::SandboxState::Ready,
-                        },
-                        created_at: chrono::DateTime::parse_from_rfc3339(&info.created_at)?
-                            .with_timezone(&chrono::Utc),
-                    },
+                    info: parse_sandbox_info(info)?,
                     affinity_name: if row.affinity_name.is_empty() {
                         None
                     } else {
