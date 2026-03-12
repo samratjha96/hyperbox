@@ -1,11 +1,18 @@
 from .client import BenchResult, ExecResult, Sandbox
 from .sdk import (
+    ActiveSandbox,
     HyperboxClient,
     Metrics,
+    PreparedRunSandbox,
+    ProcessInfo,
+    ProcessLogRead,
+    RunResult,
+    SandboxConfig,
+    SandboxDetails,
     SandboxInfo,
     SandboxSession,
-    SdkExecResult,
     ServerInfo,
+    StartedRun,
 )
 
 __all__ = [
@@ -13,9 +20,16 @@ __all__ = [
     "ExecResult",
     "BenchResult",
     "HyperboxClient",
+    "ActiveSandbox",
+    "ProcessInfo",
+    "ProcessLogRead",
+    "PreparedRunSandbox",
+    "RunResult",
+    "SandboxConfig",
+    "SandboxDetails",
     "SandboxSession",
     "SandboxInfo",
     "ServerInfo",
     "Metrics",
-    "SdkExecResult",
+    "StartedRun",
 ]

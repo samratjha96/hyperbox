@@ -13,25 +13,25 @@ pip install -e hyperbox-py
 ### gRPC SDK (recommended)
 
 ```python
-from hyperbox import HyperboxClient, SandboxSession
+from hyperbox import HyperboxClient
 
 with HyperboxClient("127.0.0.1:50051") as client:
-    with SandboxSession(client, template="python:3.12", workspace=".") as box:
-        result = box.exec("ls -la")
-        print(result.stdout)
-        print(box.sandbox_id)
-
-    info = client.create_sandbox(affinity_name="myproj", workspace=".")
-    snapshot_id, _ = client.create_snapshot(info.id, note="checkpoint")
-    client.destroy_sandbox(info.id)
-    restored, restored_from_snapshot = client.resolve_affinity(
-        "myproj", restore_if_needed=True
+    result = client.run(
+        template="python:3.12",
+        command="python3 -c 'print(2 + 2)'",
     )
-    print(snapshot_id, restored_from_snapshot, restored.id)
-    client.destroy_sandbox(restored.id)
+    print(result.process.status, result.stdout)
+
+    started = client.start_run(
+        create_config={"template": "python:3.12"},
+        command="python3 -c 'import time; print(\"detached\"); time.sleep(1)'",
+    )
+    completed = client.wait_process(started.process.process_id, timeout_secs=5)
+    stdout = client.read_process_log(started.process.process_id, "stdout")
+    print(completed.status, stdout.contents)
 ```
 
-### CLI wrapper (backward compatible)
+### CLI wrapper
 
 ```python
 from hyperbox import Sandbox

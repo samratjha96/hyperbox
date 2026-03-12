@@ -49,6 +49,51 @@ class HyperboxControlStub(object):
                 request_serializer=hyperbox_dot_v1_dot_control__pb2.InspectSandboxRequest.SerializeToString,
                 response_deserializer=hyperbox_dot_v1_dot_control__pb2.InspectSandboxResponse.FromString,
                 _registered_method=True)
+        self.ListSandboxes = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/ListSandboxes',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.ListSandboxesRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.ListSandboxesResponse.FromString,
+                _registered_method=True)
+        self.PrepareRunSandbox = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/PrepareRunSandbox',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.PrepareRunSandboxRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.PrepareRunSandboxResponse.FromString,
+                _registered_method=True)
+        self.StartRun = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/StartRun',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.StartRunRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.StartRunResponse.FromString,
+                _registered_method=True)
+        self.StartProcess = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/StartProcess',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.StartProcessRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.StartProcessResponse.FromString,
+                _registered_method=True)
+        self.GetProcess = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/GetProcess',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.GetProcessRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.GetProcessResponse.FromString,
+                _registered_method=True)
+        self.ListProcesses = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/ListProcesses',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.ListProcessesRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.ListProcessesResponse.FromString,
+                _registered_method=True)
+        self.ReadProcessLog = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/ReadProcessLog',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.ReadProcessLogRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.ReadProcessLogResponse.FromString,
+                _registered_method=True)
+        self.WaitProcess = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/WaitProcess',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.WaitProcessRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.WaitProcessResponse.FromString,
+                _registered_method=True)
+        self.CancelProcess = channel.unary_unary(
+                '/hyperbox.v1.HyperboxControl/CancelProcess',
+                request_serializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessRequest.SerializeToString,
+                response_deserializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessResponse.FromString,
+                _registered_method=True)
         self.Exec = channel.unary_unary(
                 '/hyperbox.v1.HyperboxControl/Exec',
                 request_serializer=hyperbox_dot_v1_dot_control__pb2.ExecRequest.SerializeToString,
@@ -117,6 +162,60 @@ class HyperboxControlServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def InspectSandbox(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListSandboxes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PrepareRunSandbox(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def StartRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def StartProcess(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetProcess(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListProcesses(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReadProcessLog(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WaitProcess(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CancelProcess(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -199,6 +298,51 @@ def add_HyperboxControlServicer_to_server(servicer, server):
                     servicer.InspectSandbox,
                     request_deserializer=hyperbox_dot_v1_dot_control__pb2.InspectSandboxRequest.FromString,
                     response_serializer=hyperbox_dot_v1_dot_control__pb2.InspectSandboxResponse.SerializeToString,
+            ),
+            'ListSandboxes': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListSandboxes,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.ListSandboxesRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.ListSandboxesResponse.SerializeToString,
+            ),
+            'PrepareRunSandbox': grpc.unary_unary_rpc_method_handler(
+                    servicer.PrepareRunSandbox,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.PrepareRunSandboxRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.PrepareRunSandboxResponse.SerializeToString,
+            ),
+            'StartRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartRun,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.StartRunRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.StartRunResponse.SerializeToString,
+            ),
+            'StartProcess': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartProcess,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.StartProcessRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.StartProcessResponse.SerializeToString,
+            ),
+            'GetProcess': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetProcess,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.GetProcessRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.GetProcessResponse.SerializeToString,
+            ),
+            'ListProcesses': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListProcesses,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.ListProcessesRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.ListProcessesResponse.SerializeToString,
+            ),
+            'ReadProcessLog': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadProcessLog,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.ReadProcessLogRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.ReadProcessLogResponse.SerializeToString,
+            ),
+            'WaitProcess': grpc.unary_unary_rpc_method_handler(
+                    servicer.WaitProcess,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.WaitProcessRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.WaitProcessResponse.SerializeToString,
+            ),
+            'CancelProcess': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelProcess,
+                    request_deserializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessRequest.FromString,
+                    response_serializer=hyperbox_dot_v1_dot_control__pb2.CancelProcessResponse.SerializeToString,
             ),
             'Exec': grpc.unary_unary_rpc_method_handler(
                     servicer.Exec,
@@ -332,6 +476,249 @@ class HyperboxControl(object):
             '/hyperbox.v1.HyperboxControl/InspectSandbox',
             hyperbox_dot_v1_dot_control__pb2.InspectSandboxRequest.SerializeToString,
             hyperbox_dot_v1_dot_control__pb2.InspectSandboxResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListSandboxes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/ListSandboxes',
+            hyperbox_dot_v1_dot_control__pb2.ListSandboxesRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.ListSandboxesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PrepareRunSandbox(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/PrepareRunSandbox',
+            hyperbox_dot_v1_dot_control__pb2.PrepareRunSandboxRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.PrepareRunSandboxResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/StartRun',
+            hyperbox_dot_v1_dot_control__pb2.StartRunRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.StartRunResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartProcess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/StartProcess',
+            hyperbox_dot_v1_dot_control__pb2.StartProcessRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.StartProcessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetProcess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/GetProcess',
+            hyperbox_dot_v1_dot_control__pb2.GetProcessRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.GetProcessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListProcesses(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/ListProcesses',
+            hyperbox_dot_v1_dot_control__pb2.ListProcessesRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.ListProcessesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadProcessLog(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/ReadProcessLog',
+            hyperbox_dot_v1_dot_control__pb2.ReadProcessLogRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.ReadProcessLogResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WaitProcess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/WaitProcess',
+            hyperbox_dot_v1_dot_control__pb2.WaitProcessRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.WaitProcessResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelProcess(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/hyperbox.v1.HyperboxControl/CancelProcess',
+            hyperbox_dot_v1_dot_control__pb2.CancelProcessRequest.SerializeToString,
+            hyperbox_dot_v1_dot_control__pb2.CancelProcessResponse.FromString,
             options,
             channel_credentials,
             insecure,
