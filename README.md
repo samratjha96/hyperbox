@@ -1,10 +1,10 @@
 # hyperbox
 
-Secure sandbox runtime for AI agent code execution.
+Run code in an isolated sandbox with reusable state, managed processes, and explicit network policy.
 
-Use `hyperbox` when you want to hand work to an isolated environment without losing the ergonomics of a normal shell.
+Use `hyperbox` when you need a real execution environment for agents, SDKs, or humans without putting dependencies, files, and network access on the host.
 
-It is built for:
+Use it for:
 
 - agents that should run code without touching the host
 - long-running jobs you want to detach from and inspect later
@@ -13,7 +13,7 @@ It is built for:
 
 ## Why Use It
 
-| Need | What hyperbox gives you |
+| Need | What you get |
 | --- | --- |
 | Safe default execution | isolated sandbox with `network=none` unless you opt in |
 | Reuse across runs | deterministic sessions and named sandboxes |
@@ -24,7 +24,7 @@ It is built for:
 
 ## Benchmark Snapshot
 
-Hyperbox has already been run against the real [ComputeSDK benchmarks](https://github.com/computesdk/benchmarks) flow for fresh sandbox create -> first command -> destroy.
+Hyperbox has been run against the real [ComputeSDK benchmarks](https://github.com/computesdk/benchmarks) flow: create a fresh sandbox, run the first command, destroy it.
 
 | Provider | Median TTI | Score | Position |
 | --- | ---: | ---: | --- |
@@ -35,7 +35,7 @@ Hyperbox has already been run against the real [ComputeSDK benchmarks](https://g
 | Runloop | 0.89s | 90.61 | nearby |
 | Hopx | 0.88s | 89.53 | nearby |
 
-Full benchmark notes and caveats are below in [Performance and Benchmarks](#performance-and-benchmarks).
+Full notes are in [Performance and Benchmarks](#performance-and-benchmarks).
 
 ## How It Works
 
@@ -56,13 +56,11 @@ Control plane
                  -> guest VM + agent execution service
 ```
 
-What to take away:
-
 - the control plane owns sandbox lifecycle, managed processes, snapshots, session reuse, and policy
 - macOS and Linux enforce isolation differently, but expose the same sandbox and process model
 - the CLI, SDKs, and agent integrations all talk to the same server contract
 
-## Use It Like This
+## Common Workflows
 
 ### One-off isolated command
 
@@ -70,7 +68,7 @@ What to take away:
 hyperbox run --cmd "python3 -c 'print(2 + 2)'"
 ```
 
-Use this when you want a safe default and do not care about keeping state.
+Use this for one-off commands, untrusted scripts, or quick checks where no state needs to survive.
 
 ### Reusable environment with installed tools and files
 
@@ -82,7 +80,7 @@ hyperbox run --name demo --cmd "python3 -c 'open(\"build.txt\", \"w\").write(\"s
 hyperbox run --name demo --cmd "cat build.txt"
 ```
 
-Use this when an agent or human needs a stable working environment instead of disposable runs.
+Use this when installs, generated files, and working state should still be there on the next command.
 
 ### Detach from work and come back later
 
@@ -96,11 +94,11 @@ hyperbox logs "$PROC"
 hyperbox wait "$PROC"
 ```
 
-Use this when work should continue without holding open your terminal or SDK call.
+Use this when the command should outlive the terminal session or API call that started it.
 
 ### Restrict outbound network access
 
-Note: on some macOS hosts, `allowlist` may be unavailable. If Hyperbox reports that, use `network=none|full` for now and run `hyperbox setup` to check host prerequisites.
+On some macOS hosts, `allowlist` may be unavailable. If that happens, use `network=none|full` for now and run `hyperbox setup`.
 
 ```bash
 hyperbox run --network allowlist --allow example.com \
@@ -110,9 +108,9 @@ hyperbox run --network allowlist --allow example.com \
   --cmd "python3 -c \"import urllib.request; urllib.request.urlopen('https://github.com', timeout=8)\""
 ```
 
-The second command should fail because `github.com` is not allowlisted.
+The second command should fail because `github.com` is not on the allowlist.
 
-Tip: add `--explain` to see effective backend mode and enforcement details for your host.
+Use `--explain` to see what the host is actually enforcing.
 
 ### Allow subdomains without allowing the apex domain
 
@@ -124,15 +122,15 @@ hyperbox run --network allowlist --allow '*.example.com' \
   --cmd "python3 -c \"import socket; print(socket.gethostbyname('example.com'))\""
 ```
 
-The first command should succeed. The second should fail because `*.example.com` is strict subdomains only.
+The first command should succeed. The second should fail because `*.example.com` means subdomains only.
 
 ## Core Concepts
 
 - sessions and affinity: `hyperbox run` reuses a deterministic session unless you pass `--ephemeral`; `create --name` gives you a stable sandbox you can target directly
-- managed processes: `run` starts a tracked process; `run --detach`, `logs`, `wait`, and `cancel` let you delegate work and come back later
-- templates: each sandbox starts from a template such as `python:3.12`; run `hyperbox templates` to inspect what is available
-- network policy: `none`, `allowlist`, and `full` are part of sandbox policy; use `--explain` to see what the current host enforces
-- workspace behavior: `--workspace <PATH>` mounts an existing host tree; without it, Hyperbox creates managed sandbox storage
+- managed processes: `run` starts a tracked process; `run --detach`, `logs`, `wait`, and `cancel` are the normal control surface for long work
+- templates: each sandbox starts from a template such as `python:3.12`; run `hyperbox templates` to see what is available
+- network policy: `none`, `allowlist`, and `full` are part of sandbox policy; `--explain` shows what the current host can enforce
+- workspace behavior: `--workspace <PATH>` mounts an existing host tree; without it, Hyperbox creates sandbox-managed storage
 
 ## Setup
 
@@ -252,15 +250,15 @@ hyperbox run --profile team_web --cmd "python3 -m pip install requests"
 
 ## SDKs
 
-The gRPC control plane is the stable integration surface.
+The gRPC control plane is the integration surface.
 
-Current in-repo examples and tooling focus on:
+In-repo clients:
 
-- CLI-driven human workflows
+- the `hyperbox` CLI
 - Python SDK in [`hyperbox-py`](hyperbox-py)
 - TypeScript SDK in [`hyperbox-ts`](hyperbox-ts)
 
-Both SDKs talk to the same managed-process gRPC control plane used by the CLI.
+Both SDKs use the same managed-process control plane as the CLI.
 
 TypeScript example:
 
@@ -302,7 +300,7 @@ Hyperbox was run against the [ComputeSDK benchmarks](https://github.com/computes
 
 No session reuse or benchmark-only shortcuts were used.
 
-Directional result from the local macOS run used during development:
+This was the local macOS result used during development:
 
 | Provider | Median TTI | Score | Position |
 | --- | ---: | ---: | --- |
@@ -313,19 +311,19 @@ Directional result from the local macOS run used during development:
 | Runloop | 0.89s | 90.61 | nearby |
 | Hopx | 0.88s | 89.53 | nearby |
 
-Important caveat:
+Context:
 
 - Hyperbox was measured locally on macOS with a small sample during development
 - the published ComputeSDK leaderboard was measured on their own infrastructure with larger samples
 - treat this as directional positioning, not a claimed official rank
 
-What this means in practice:
+Takeaway:
 
 - Hyperbox is not the fastest cold-start sandbox in that benchmark today
 - it is in the next competitive tier rather than far off the board
 - the remaining gap is mostly backend startup cost, not obvious control-plane waste
 
-Benchmark tooling and historical reports are included in the repository. Rerun benchmarks in your own environment before making decisions.
+Benchmark tooling and historical reports are included in the repository. Rerun them in your own environment before making decisions.
 
 ## Troubleshooting
 
@@ -340,7 +338,7 @@ pkill -f hyperbox || true
 hyperbox list
 ```
 
-If you run the control plane manually, start it explicitly:
+If you run the control plane manually:
 
 ```bash
 hyperbox serve --addr 127.0.0.1:50051
@@ -348,7 +346,7 @@ hyperbox serve --addr 127.0.0.1:50051
 
 ### Allowlist mode is unavailable or behaving unexpectedly
 
-Check what Hyperbox is actually enforcing on this host:
+Check what Hyperbox is enforcing on this host:
 
 ```bash
 hyperbox run --network allowlist --allow example.com --cmd "true" --explain
@@ -360,7 +358,7 @@ On macOS, `hyperbox setup` installs and verifies the runtime prerequisites used 
 hyperbox setup
 ```
 
-If the host cannot enforce allowlists yet, use `network=none` or `network=full` instead of assuming partial enforcement.
+If the host cannot enforce allowlists yet, use `network=none` or `network=full`.
 
 ### `invalid allowlist ...`
 
