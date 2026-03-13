@@ -23,6 +23,7 @@ pub struct SandboxLease {
 
 #[async_trait]
 pub trait SandboxBackend: Send + Sync {
+    fn validate_config(&self, config: &SandboxConfig) -> Result<()>;
     async fn create(&self, config: SandboxConfig) -> Result<SandboxLease>;
     async fn exec(&self, sandbox_id: &SandboxId, req: ExecRequest) -> Result<ExecOutcome>;
     async fn read_file(&self, sandbox_id: &SandboxId, path: &str) -> Result<FilePayload>;

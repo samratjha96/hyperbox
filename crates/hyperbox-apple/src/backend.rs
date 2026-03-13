@@ -638,11 +638,17 @@ impl AppleVzBackend {
 
 #[async_trait::async_trait]
 impl SandboxBackend for AppleVzBackend {
+    fn validate_config(&self, config: &SandboxConfig) -> Result<()> {
+        let direct_container_mode = self.use_direct_container_mode()
+            && !matches!(config.network, NetworkMode::Allowlist(_));
+        ensure_supported_apple_network_mode(&self.config, direct_container_mode, &config.network)
+    }
+
     async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+        self.validate_config(&config)?;
         let create_started = std::time::Instant::now();
         let direct_container_mode = self.use_direct_container_mode()
             && !matches!(config.network, NetworkMode::Allowlist(_));
-        ensure_supported_apple_network_mode(&self.config, direct_container_mode, &config.network)?;
         if self.config.launch_command.is_none() {
             return Err(HyperboxError::InvalidConfig(
                 "apple backend requires HYPERBOX_APPLE_HELPER to be configured".to_string(),
@@ -877,11 +883,7 @@ impl SandboxBackend for AppleVzBackend {
 
         if let Some(direct) = direct_container {
             return self
-                .read_file_in_container(
-                    &direct.container_name,
-                    path,
-                    DEFAULT_IO_TIMEOUT_SECS,
-                )
+                .read_file_in_container(&direct.container_name, path, DEFAULT_IO_TIMEOUT_SECS)
                 .await;
         }
 
@@ -960,11 +962,7 @@ impl SandboxBackend for AppleVzBackend {
 
         if let Some(direct) = direct_container {
             return self
-                .write_file_in_container(
-                    &direct.container_name,
-                    payload,
-                    DEFAULT_IO_TIMEOUT_SECS,
-                )
+                .write_file_in_container(&direct.container_name, payload, DEFAULT_IO_TIMEOUT_SECS)
                 .await;
         }
 
@@ -1498,7 +1496,7 @@ fn helper_network_fields(network: &NetworkMode) -> (String, Vec<String>) {
     match network {
         NetworkMode::None => ("none".to_string(), vec![]),
         NetworkMode::Full => ("full".to_string(), vec![]),
-        NetworkMode::Allowlist(domains) => ("allowlist".to_string(), domains.clone()),
+        NetworkMode::Allowlist(domains) => ("allowlist".to_string(), domains.to_strings()),
     }
 }
 
@@ -1522,8 +1520,8 @@ mod tests {
     };
     use chrono::Utc;
     use hyperbox_core::{
-        HyperboxError, NetworkMode, SandboxBackend, SandboxConfig, SandboxId, SandboxInfo,
-        SandboxState,
+        Allowlist, HyperboxError, NetworkMode, SandboxBackend, SandboxConfig, SandboxId,
+        SandboxInfo, SandboxState,
     };
     use std::{fs, path::PathBuf};
 
@@ -1579,7 +1577,9 @@ mod tests {
         let err = ensure_supported_apple_network_mode(
             &config,
             true,
-            &NetworkMode::Allowlist(vec!["pypi.org".to_string()]),
+            &NetworkMode::Allowlist(
+                Allowlist::parse(&["pypi.org".to_string()]).expect("allowlist"),
+            ),
         )
         .expect_err("allowlist should fail without enforcement");
         assert!(
@@ -1600,10 +1600,28 @@ mod tests {
             ensure_supported_apple_network_mode(
                 &config,
                 false,
-                &NetworkMode::Allowlist(vec!["example.com".to_string()])
+                &NetworkMode::Allowlist(
+                    Allowlist::parse(&["example.com".to_string()]).expect("allowlist"),
+                )
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn apple_backend_validate_config_routes_allowlist_to_helper_path() {
+        let backend = AppleVzBackend::new(AppleBackendConfig {
+            launch_command: Some(vec!["hyperbox".to_string(), "apple-helper".to_string()]),
+            runtime_kind: AppleRuntimeKind::Containerization,
+            ..AppleBackendConfig::default()
+        });
+        let config = SandboxConfig {
+            network: NetworkMode::Allowlist(
+                Allowlist::parse(&["example.com".to_string()]).expect("allowlist"),
+            ),
+            ..SandboxConfig::default()
+        };
+        assert!(backend.validate_config(&config).is_ok());
     }
 
     #[test]
@@ -1746,7 +1764,9 @@ done
                 "hyperbox".to_string(),
                 "apple-helper".to_string(),
                 "--container-bin".to_string(),
-                root.join("missing-container-bin").to_string_lossy().to_string(),
+                root.join("missing-container-bin")
+                    .to_string_lossy()
+                    .to_string(),
             ]),
             runtime_kind: AppleRuntimeKind::Containerization,
             ..AppleBackendConfig::default()

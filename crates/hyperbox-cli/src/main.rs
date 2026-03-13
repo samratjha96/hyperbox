@@ -18,10 +18,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use hyperbox_core::config::normalize_allowlist_domains;
 use hyperbox_core::{
-    ExecRequest, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, SandboxConfig, SandboxId,
-    SnapshotId, StreamName,
+    Allowlist, ExecRequest, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, SandboxConfig,
+    SandboxId, SnapshotId, StreamName,
 };
 use hyperbox_proto::hyperbox::v1::{
     self as pb, hyperbox_agent_client::HyperboxAgentClient, shell_event, shell_request,
@@ -472,7 +471,7 @@ enum NetworkArg {
 }
 
 impl NetworkArg {
-    fn to_mode(self, allow: Vec<String>) -> NetworkMode {
+    fn to_mode(self, allow: Allowlist) -> NetworkMode {
         match self {
             Self::None => NetworkMode::None,
             Self::Full => NetworkMode::Full,
@@ -982,7 +981,10 @@ async fn main() -> anyhow::Result<()> {
                 cli.server_url,
                 SandboxConfig {
                     template,
-                    network: network.to_mode(allow),
+                    network: network.to_mode(
+                        Allowlist::parse(&allow)
+                            .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?,
+                    ),
                     timeout_secs: timeout,
                     workspace_dir: workspace,
                     ..SandboxConfig::default()
@@ -1057,7 +1059,10 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     let config = SandboxConfig {
                         template,
-                        network: network.to_mode(allow),
+                        network: network.to_mode(
+                            Allowlist::parse(&allow)
+                                .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?,
+                        ),
                         timeout_secs: timeout,
                         workspace_dir: workspace,
                         ..SandboxConfig::default()
@@ -1346,7 +1351,7 @@ fn resolve_network_policy(
             NetworkArg::Allowlist => {
                 let defaults = match &resolved.network_mode {
                     NetworkMode::Allowlist(domains) => domains.clone(),
-                    _ => Vec::new(),
+                    _ => Allowlist::parse(&[]).expect("empty allowlist"),
                 };
                 NetworkMode::Allowlist(defaults)
             }
@@ -1355,7 +1360,10 @@ fn resolve_network_policy(
 
     if !allow.is_empty() {
         match &mut resolved.network_mode {
-            NetworkMode::Allowlist(domains) => *domains = allow,
+            NetworkMode::Allowlist(domains) => {
+                *domains = Allowlist::parse(&allow)
+                    .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?
+            }
             _ => bail!(
                 "--allow requires allowlist network (set --network allowlist or use an allowlist profile)"
             ),
@@ -1370,11 +1378,6 @@ fn resolve_network_policy(
         );
     }
 
-    if let NetworkMode::Allowlist(domains) = &mut resolved.network_mode {
-        *domains = normalize_allowlist_domains(domains)
-            .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?;
-    }
-
     Ok(resolved)
 }
 
@@ -1385,7 +1388,9 @@ fn resolve_profile_network_defaults(
     if let Some(builtin) = ProfileArg::parse_builtin(profile_name) {
         return Ok(match builtin {
             ProfileArg::Locked => NetworkMode::None,
-            ProfileArg::Web => NetworkMode::Allowlist(Vec::new()),
+            ProfileArg::Web => {
+                NetworkMode::Allowlist(Allowlist::parse(&[]).expect("empty allowlist"))
+            }
             ProfileArg::Full => NetworkMode::Full,
         });
     }
@@ -1410,7 +1415,10 @@ fn resolve_profile_network_defaults(
     let network = match profile.network.to_ascii_lowercase().as_str() {
         "none" => NetworkMode::None,
         "full" => NetworkMode::Full,
-        "allowlist" => NetworkMode::Allowlist(profile.allow.clone()),
+        "allowlist" => NetworkMode::Allowlist(
+            Allowlist::parse(&profile.allow)
+                .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?,
+        ),
         other => {
             bail!(
                 "profile `{profile_name}` has invalid network `{other}`; expected one of: none, allowlist, full"
@@ -2301,7 +2309,7 @@ async fn run_proxy_loop(server_url: Option<String>, config: SandboxConfig) -> an
             if domains.is_empty() {
                 "allowlist".to_string()
             } else {
-                format!("allowlist({})", domains.join(","))
+                format!("allowlist({})", domains.to_strings().join(","))
             }
         }
     };
@@ -2937,7 +2945,7 @@ mod tests {
         network_enforcement_status, resolve_network_policy,
         writable_scope_from_workspace_and_writes,
     };
-    use hyperbox_core::NetworkMode;
+    use hyperbox_core::{Allowlist, NetworkMode};
     use hyperbox_server::ServerInfo;
     use uuid::Uuid;
 
@@ -3003,7 +3011,9 @@ mod tests {
 
         let (status, reason) = network_enforcement_status(
             Some(&server_info),
-            Some(&NetworkMode::Allowlist(vec!["example.com".to_string()])),
+            Some(&NetworkMode::Allowlist(
+                Allowlist::parse(&["example.com".to_string()]).expect("allowlist"),
+            )),
         );
         assert_eq!(status, "enforced");
         assert!(reason.is_some());
@@ -3025,7 +3035,9 @@ mod tests {
 
         let (status, reason) = network_enforcement_status(
             Some(&server_info),
-            Some(&NetworkMode::Allowlist(vec!["example.com".to_string()])),
+            Some(&NetworkMode::Allowlist(
+                Allowlist::parse(&["example.com".to_string()]).expect("allowlist"),
+            )),
         );
         assert_eq!(status, "enforced");
         assert!(reason.is_some());
@@ -3078,7 +3090,7 @@ mod tests {
         .expect("wildcards should be accepted");
         match resolved.network_mode {
             NetworkMode::Allowlist(domains) => {
-                assert_eq!(domains, vec!["*.example.com"]);
+                assert_eq!(domains.to_strings(), vec!["*.example.com"]);
             }
             other => panic!("expected allowlist mode, got {other:?}"),
         }
@@ -3097,7 +3109,7 @@ mod tests {
             NetworkMode::Allowlist(domains) => domains,
             other => panic!("expected allowlist mode, got {other:?}"),
         };
-        assert_eq!(domains, vec!["example.com".to_string()]);
+        assert_eq!(domains.to_strings(), vec!["example.com".to_string()]);
     }
 
     #[test]
@@ -3166,7 +3178,7 @@ allow = ["github.com", "pypi.org"]
             other => panic!("expected allowlist mode, got {other:?}"),
         };
         assert_eq!(
-            domains,
+            domains.to_strings(),
             vec!["github.com".to_string(), "pypi.org".to_string()]
         );
         assert_eq!(resolved.profile_label.as_deref(), Some("team_web"));

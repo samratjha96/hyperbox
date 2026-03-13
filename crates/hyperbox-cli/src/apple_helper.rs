@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use hyperbox_core::config::normalize_allowlist_domains;
+use hyperbox_core::Allowlist;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -158,7 +158,7 @@ enum RuntimeKind {
 enum HelperNetworkMode {
     None,
     Full,
-    Allowlist(Vec<String>),
+    Allowlist(Allowlist),
 }
 
 #[derive(Debug, Deserialize)]
@@ -478,7 +478,7 @@ impl AppleHelper {
     async fn setup_allowlist_runtime(
         &self,
         sandbox_id: &str,
-        domains: &[String],
+        domains: &Allowlist,
     ) -> anyhow::Result<AllowlistRuntimeSetup> {
         let network_name = format!("{ALLOWLIST_NETWORK_PREFIX}{sandbox_id}");
         let dns_container_name = format!("{ALLOWLIST_DNS_PREFIX}{sandbox_id}");
@@ -504,8 +504,8 @@ impl AppleHelper {
 
         let setup_result = async {
             let gateway_ip = self.inspect_network_gateway(&network_name).await?;
-            let allowlist_json =
-                serde_json::to_string(domains).context("serialize allowlist domains")?;
+            let allowlist_json = serde_json::to_string(&domains.to_strings())
+                .context("serialize allowlist domains")?;
             let allowlist_b64 = BASE64.encode(allowlist_json.as_bytes());
             let dns_script_b64 = BASE64.encode(ALLOWLIST_DNS_SCRIPT.as_bytes());
 
@@ -1030,7 +1030,7 @@ impl HelperNetworkMode {
             "none" => Ok(Self::None),
             "full" => Ok(Self::Full),
             "allowlist" => {
-                let normalized = normalize_allowlist_domains(&allowlist)
+                let normalized = Allowlist::parse(&allowlist)
                     .map_err(|msg| anyhow!("invalid allowlist: {msg}"))?;
                 Ok(Self::Allowlist(normalized))
             }
@@ -1115,6 +1115,7 @@ mod tests {
         AllowlistRuntimeSetup, HelperNetworkMode, RuntimeKind, normalize_relative_path,
         sanitize_sandbox_id,
     };
+    use hyperbox_core::Allowlist;
 
     #[test]
     fn runtime_parser_accepts_supported_values() {
@@ -1210,7 +1211,9 @@ mod tests {
             .expect("wildcards should be accepted");
         assert_eq!(
             mode,
-            HelperNetworkMode::Allowlist(vec!["*.example.com".to_string()])
+            HelperNetworkMode::Allowlist(
+                Allowlist::parse(&["*.example.com".to_string()]).expect("allowlist")
+            )
         );
     }
 }

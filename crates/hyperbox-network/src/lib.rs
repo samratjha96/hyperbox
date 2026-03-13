@@ -1,73 +1,14 @@
 pub mod dns_proxy;
 pub mod firewall;
 
+use hyperbox_core::{Allowlist, NetworkMode};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
-
-use hyperbox_core::NetworkMode;
 
 pub use dns_proxy::{DnsAllowlistProxy, ResolvedIp};
 pub use firewall::{
     CommandExecutor, CommandSpec, FirewallManager, RecordingExecutor, ShellExecutor, VmNetworkSpec,
     build_allowlist_population_plan, build_apply_plan, build_teardown_plan,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainPattern {
-    Exact(String),
-    WildcardSuffix(String),
-}
-
-impl DomainPattern {
-    pub fn parse(raw: &str) -> Option<Self> {
-        if raw.is_empty() {
-            return None;
-        }
-
-        if let Some(rest) = raw.strip_prefix("*.") {
-            if rest.is_empty() {
-                return None;
-            }
-
-            return Some(Self::WildcardSuffix(rest.to_ascii_lowercase()));
-        }
-
-        Some(Self::Exact(raw.to_ascii_lowercase()))
-    }
-
-    pub fn matches(&self, host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        match self {
-            Self::Exact(exact) => &host == exact,
-            Self::WildcardSuffix(suffix) => {
-                host.ends_with(suffix)
-                    && host
-                        .strip_suffix(suffix)
-                        .is_some_and(|prefix| prefix.ends_with('.'))
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Allowlist {
-    patterns: Vec<DomainPattern>,
-}
-
-impl Allowlist {
-    pub fn new(entries: &[String]) -> Self {
-        let patterns = entries
-            .iter()
-            .filter_map(|entry| DomainPattern::parse(entry))
-            .collect();
-        Self { patterns }
-    }
-
-    pub fn allows(&self, domain: &str) -> bool {
-        self.patterns.iter().any(|pattern| pattern.matches(domain))
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct NetworkPolicyEvaluator {
@@ -78,7 +19,7 @@ pub struct NetworkPolicyEvaluator {
 impl NetworkPolicyEvaluator {
     pub fn new(mode: &NetworkMode) -> Self {
         let allowlist = match mode {
-            NetworkMode::Allowlist(entries) => Some(Allowlist::new(entries)),
+            NetworkMode::Allowlist(entries) => Some(entries.clone()),
             _ => None,
         };
 
@@ -107,20 +48,21 @@ impl NetworkPolicyEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperbox_core::AllowlistEntry;
 
     #[test]
     fn wildcard_requires_subdomain() {
-        let pattern = DomainPattern::parse("*.github.com").expect("pattern");
+        let pattern = AllowlistEntry::parse("*.github.com").expect("pattern");
         assert!(pattern.matches("api.github.com"));
         assert!(!pattern.matches("github.com"));
     }
 
     #[test]
     fn network_modes_behave() {
-        let mode = NetworkMode::Allowlist(vec![
-            "api.openai.com".to_string(),
-            "*.github.com".to_string(),
-        ]);
+        let mode = NetworkMode::Allowlist(
+            Allowlist::parse(&["api.openai.com".to_string(), "*.github.com".to_string()])
+                .expect("allowlist"),
+        );
         let eval = NetworkPolicyEvaluator::new(&mode);
         assert!(eval.allows_domain(&mode, "api.openai.com"));
         assert!(eval.allows_domain(&mode, "gist.github.com"));

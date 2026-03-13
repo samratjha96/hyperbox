@@ -1,6 +1,6 @@
 use hyperbox_core::{
-    NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, ProcessLogRead, ProcessStatus,
-    SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata, StreamName,
+    Allowlist, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, ProcessLogRead,
+    ProcessStatus, SandboxConfig, SandboxInfo, SnapshotId, SnapshotMetadata, StreamName,
 };
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_client::HyperboxControlClient};
 
@@ -68,7 +68,9 @@ fn parse_sandbox_info(info: pb::SandboxInfo) -> anyhow::Result<SandboxInfo> {
 fn into_proto_config(config: SandboxConfig) -> pb::SandboxConfig {
     let (network_mode, network_allowlist) = match config.network {
         NetworkMode::None => (pb::NetworkMode::None as i32, Vec::new()),
-        NetworkMode::Allowlist(domains) => (pb::NetworkMode::Allowlist as i32, domains),
+        NetworkMode::Allowlist(domains) => {
+            (pb::NetworkMode::Allowlist as i32, domains.to_strings())
+        }
         NetworkMode::Full => (pb::NetworkMode::Full as i32, Vec::new()),
     };
 
@@ -189,7 +191,7 @@ impl GrpcControlClient {
                     NetworkMode::Full => pb::NetworkMode::Full as i32,
                 },
                 network_allowlist: match config.network {
-                    NetworkMode::Allowlist(v) => v,
+                    NetworkMode::Allowlist(v) => v.to_strings(),
                     _ => vec![],
                 },
             }),
@@ -479,7 +481,9 @@ impl GrpcControlClient {
                 network: match pb::NetworkMode::try_from(config.network_mode)
                     .unwrap_or(pb::NetworkMode::None)
                 {
-                    pb::NetworkMode::Allowlist => NetworkMode::Allowlist(config.network_allowlist),
+                    pb::NetworkMode::Allowlist => NetworkMode::Allowlist(
+                        Allowlist::parse(&config.network_allowlist).map_err(anyhow::Error::msg)?,
+                    ),
                     pb::NetworkMode::Full => NetworkMode::Full,
                     _ => NetworkMode::None,
                 },

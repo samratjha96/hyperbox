@@ -257,7 +257,10 @@ mod tests {
     fn allowlist_plan_contains_ipset_reference() {
         let plan = build_apply_plan(
             &spec(),
-            &NetworkMode::Allowlist(vec!["api.openai.com".to_string()]),
+            &NetworkMode::Allowlist(
+                hyperbox_core::Allowlist::parse(&["api.openai.com".to_string()])
+                    .expect("allowlist"),
+            ),
         );
         assert!(
             plan.iter()

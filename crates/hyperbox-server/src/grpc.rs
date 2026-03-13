@@ -2,8 +2,8 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 
 use hyperbox_core::{
-    FilePayload, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo, ProcessLogRead,
-    SandboxConfig, SandboxId, SnapshotId, StreamName,
+    Allowlist, FilePayload, NetworkMode, ProcessDisposition, ProcessId, ProcessInfo,
+    ProcessLogRead, SandboxConfig, SandboxId, SnapshotId, StreamName,
 };
 use hyperbox_proto::hyperbox::v1::{self as pb, hyperbox_control_server::HyperboxControl};
 
@@ -129,15 +129,17 @@ fn parse_stream_name(raw: &str) -> Result<StreamName, Status> {
     }
 }
 
-fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
+fn from_proto_config(config: pb::SandboxConfig) -> Result<SandboxConfig, Status> {
     let network =
         match pb::NetworkMode::try_from(config.network_mode).unwrap_or(pb::NetworkMode::None) {
-            pb::NetworkMode::Allowlist => NetworkMode::Allowlist(config.network_allowlist),
+            pb::NetworkMode::Allowlist => NetworkMode::Allowlist(
+                Allowlist::parse(&config.network_allowlist).map_err(Status::invalid_argument)?,
+            ),
             pb::NetworkMode::Full => NetworkMode::Full,
             _ => NetworkMode::None,
         };
 
-    SandboxConfig {
+    Ok(SandboxConfig {
         affinity_name: if config.affinity_name.is_empty() {
             None
         } else {
@@ -170,13 +172,15 @@ fn from_proto_config(config: pb::SandboxConfig) -> SandboxConfig {
         } else {
             config.timeout_secs
         },
-    }
+    })
 }
 
 fn into_proto_config(config: SandboxConfig) -> pb::SandboxConfig {
     let (network_mode, network_allowlist) = match config.network {
         NetworkMode::None => (pb::NetworkMode::None as i32, Vec::new()),
-        NetworkMode::Allowlist(domains) => (pb::NetworkMode::Allowlist as i32, domains),
+        NetworkMode::Allowlist(domains) => {
+            (pb::NetworkMode::Allowlist as i32, domains.to_strings())
+        }
         NetworkMode::Full => (pb::NetworkMode::Full as i32, Vec::new()),
     };
 
@@ -259,7 +263,7 @@ impl HyperboxControl for GrpcControlService {
                 } else {
                     Some(request.affinity_name)
                 },
-                create_config: request.create_config.map(from_proto_config),
+                create_config: request.create_config.map(from_proto_config).transpose()?,
                 reuse_auto_session: request.reuse_auto_session,
                 ensure_commands: request.ensure_commands,
                 writes: request
@@ -287,7 +291,10 @@ impl HyperboxControl for GrpcControlService {
         let sandbox_id = parse_sandbox_id(&request.sandbox_id)?;
         let prepared = self
             .runtime
-            .prepare_run_sandbox(&sandbox_id, request.overflow_config.map(from_proto_config))
+            .prepare_run_sandbox(
+                &sandbox_id,
+                request.overflow_config.map(from_proto_config).transpose()?,
+            )
             .await
             .map_err(|e| {
                 error!(peer = ?peer, sandbox_id = %sandbox_id.0, error = %e, "grpc prepare_run_sandbox failed");
@@ -391,6 +398,7 @@ impl HyperboxControl for GrpcControlService {
             .into_inner()
             .config
             .map(from_proto_config)
+            .transpose()?
             .unwrap_or_default();
         info!(
             peer = ?peer,

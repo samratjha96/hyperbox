@@ -136,7 +136,10 @@ mod tests {
     #[tokio::test]
     async fn blocks_non_allowlisted_domain() {
         let proxy = DnsAllowlistProxy::new(
-            NetworkMode::Allowlist(vec!["api.openai.com".to_string()]),
+            NetworkMode::Allowlist(
+                hyperbox_core::Allowlist::parse(&["api.openai.com".to_string()])
+                    .expect("allowlist"),
+            ),
             "1.1.1.1:53".parse().expect("upstream socket"),
         );
 

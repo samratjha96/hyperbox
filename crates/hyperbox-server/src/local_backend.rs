@@ -102,7 +102,7 @@ impl LocalBackend {
 
 #[async_trait::async_trait]
 impl SandboxBackend for LocalBackend {
-    async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+    fn validate_config(&self, config: &SandboxConfig) -> Result<()> {
         if !matches!(config.network, NetworkMode::None) {
             let allow_unsafe = std::env::var("HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -113,6 +113,11 @@ impl SandboxBackend for LocalBackend {
                 ));
             }
         }
+        Ok(())
+    }
+
+    async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+        self.validate_config(&config)?;
 
         fs::create_dir_all(&self.root_dir).await?;
 
@@ -453,7 +458,9 @@ mod tests {
 
         let result = backend
             .create(SandboxConfig {
-                network: NetworkMode::Allowlist(vec!["pypi.org".to_string()]),
+                network: NetworkMode::Allowlist(
+                    hyperbox_core::Allowlist::parse(&["pypi.org".to_string()]).expect("allowlist"),
+                ),
                 ..SandboxConfig::default()
             })
             .await;

@@ -65,6 +65,10 @@ impl UnavailableBackend {
 
 #[async_trait::async_trait]
 impl SandboxBackend for UnavailableBackend {
+    fn validate_config(&self, _config: &SandboxConfig) -> Result<()> {
+        Err(self.err())
+    }
+
     async fn create(&self, _config: SandboxConfig) -> Result<SandboxLease> {
         Err(self.err())
     }

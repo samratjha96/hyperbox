@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use hyperbox_core::NetworkMode;
+use hyperbox_core::{Allowlist, NetworkMode};
 use hyperbox_network::DnsAllowlistProxy;
 
 #[tokio::main]
@@ -26,7 +26,10 @@ async fn main() -> anyhow::Result<()> {
         allowlist
     );
 
-    let proxy = DnsAllowlistProxy::new(NetworkMode::Allowlist(allowlist), upstream);
+    let proxy = DnsAllowlistProxy::new(
+        NetworkMode::Allowlist(Allowlist::parse(&allowlist).map_err(anyhow::Error::msg)?),
+        upstream,
+    );
     proxy
         .serve(listen, |resolved| {
             if !resolved.is_empty() {

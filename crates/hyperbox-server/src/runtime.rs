@@ -148,6 +148,7 @@ impl HyperboxServer {
             vcpu_count = config.vcpu_count,
             "runtime create_sandbox"
         );
+        self.backend.validate_config(&config)?;
         let lease = self.backend.create(config.clone()).await?;
         if let Some(name) = config.affinity_name.as_deref() {
             self.snapshots.bind_sandbox(name, &lease.id).await?;
@@ -1141,7 +1142,7 @@ fn derive_auto_run_affinity_name(
                         format!(
                             "{template}\n{}\nallowlist:{}",
                             workspace_dir.unwrap_or(""),
-                            domains.join(",")
+                            domains.to_strings().join(",")
                         )
                         .as_bytes()
                     )
@@ -1229,6 +1230,10 @@ mod tests {
 
     #[async_trait]
     impl SandboxBackend for CountingBackend {
+        fn validate_config(&self, config: &SandboxConfig) -> Result<()> {
+            self.inner.validate_config(config)
+        }
+
         async fn create(&self, config: SandboxConfig) -> Result<hyperbox_core::SandboxLease> {
             self.inner.create(config).await
         }

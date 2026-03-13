@@ -17,10 +17,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use hyperbox_core::config::normalize_allowlist_domains;
 use hyperbox_core::{
-    FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig, SandboxId,
-    SandboxInfo, SandboxLease, SandboxState, SnapshotId,
+    AllowlistEntry, FilePayload, HyperboxError, NetworkMode, Result, SandboxBackend, SandboxConfig,
+    SandboxId, SandboxInfo, SandboxLease, SandboxState, SnapshotId,
 };
 use hyperbox_network::{
     CommandExecutor, FirewallManager, NetworkPolicyEvaluator, RecordingExecutor, ShellExecutor,
@@ -117,7 +116,7 @@ impl FirecrackerBackend {
         (socket, vsock, log)
     }
 
-    async fn resolve_allowlist_ips(&self, domains: &[String]) -> Result<Vec<IpAddr>> {
+    async fn resolve_allowlist_ips(&self, domains: &[AllowlistEntry]) -> Result<Vec<IpAddr>> {
         resolve_allowlist_ips(domains).await
     }
 
@@ -336,19 +335,22 @@ fn create_symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
     ))
 }
 
-async fn resolve_allowlist_ips(domains: &[String]) -> Result<Vec<IpAddr>> {
-    let domains = normalize_allowlist_domains(domains).map_err(HyperboxError::InvalidConfig)?;
-    if let Some(domain) = domains.iter().find(|domain| domain.starts_with("*.")) {
+async fn resolve_allowlist_ips(domains: &[AllowlistEntry]) -> Result<Vec<IpAddr>> {
+    if let Some(domain) = domains.iter().find(|domain| domain.is_wildcard()) {
         return Err(HyperboxError::InvalidConfig(format!(
-            "firecracker allowlist does not support wildcard domain `{domain}` yet"
+            "firecracker allowlist does not support wildcard domain `{}` yet",
+            domain.to_pattern_string()
         )));
     }
     let mut resolved = BTreeSet::new();
     for domain in domains {
-        let entries = tokio::net::lookup_host((domain.as_str(), 443))
+        let hostname = domain.as_str();
+        let entries = tokio::net::lookup_host((hostname, 443))
             .await
             .map_err(|e| {
-                HyperboxError::ExecutionFailed(format!("resolve allowlist domain `{domain}`: {e}"))
+                HyperboxError::ExecutionFailed(format!(
+                    "resolve allowlist domain `{hostname}`: {e}"
+                ))
             })?;
         for entry in entries {
             resolved.insert(entry.ip());
@@ -385,7 +387,7 @@ fn allowlist_refresh_interval_secs() -> u64 {
 
 #[async_trait::async_trait]
 impl SandboxBackend for FirecrackerBackend {
-    async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+    fn validate_config(&self, config: &SandboxConfig) -> Result<()> {
         if !matches!(config.network, NetworkMode::None) && self.config.network_dry_run {
             return Err(HyperboxError::InvalidConfig(
                 "network policy requires real firewall enforcement; set HYPERBOX_NETWORK_DRY_RUN=0"
@@ -398,7 +400,18 @@ impl SandboxBackend for FirecrackerBackend {
                     "allowlist mode requires at least one --allow domain".to_string(),
                 ));
             }
+            if let Some(domain) = domains.entries().iter().find(|entry| entry.is_wildcard()) {
+                return Err(HyperboxError::InvalidConfig(format!(
+                    "firecracker allowlist does not support wildcard domain `{}` yet",
+                    domain.to_pattern_string()
+                )));
+            }
         }
+        Ok(())
+    }
+
+    async fn create(&self, config: SandboxConfig) -> Result<SandboxLease> {
+        self.validate_config(&config)?;
 
         tokio::fs::create_dir_all(&self.config.work_dir).await?;
 
@@ -460,11 +473,11 @@ impl SandboxBackend for FirecrackerBackend {
             let _ = NetworkPolicyEvaluator::new(&config.network);
 
             if let NetworkMode::Allowlist(domains) = &config.network {
-                let ips = self.resolve_allowlist_ips(domains).await?;
+                let ips = self.resolve_allowlist_ips(domains.entries()).await?;
                 populate_allowlist_set(&spec.vm_id, &ips).await?;
 
                 let vm_id = spec.vm_id.clone();
-                let domains = domains.clone();
+                let domains = domains.entries().to_vec();
                 let refresh_every = allowlist_refresh_interval_secs();
                 allowlist_sync_task = Some(tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(Duration::from_secs(refresh_every));
@@ -736,7 +749,9 @@ mod tests {
         FirecrackerBackend, FirecrackerBackendConfig, parse_agent_socket_addr,
         resolve_allowlist_ips,
     };
-    use hyperbox_core::{HyperboxError, NetworkMode, Result, SandboxConfig, SandboxId};
+    use hyperbox_core::{
+        AllowlistEntry, HyperboxError, NetworkMode, Result, SandboxConfig, SandboxId,
+    };
 
     #[test]
     fn parses_agent_socket_addr_from_url() {
@@ -829,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_allowlist_ips_rejects_wildcards() {
-        let err = resolve_allowlist_ips(&["*.example.com".to_string()])
+        let err = resolve_allowlist_ips(&[AllowlistEntry::parse("*.example.com").expect("parse")])
             .await
             .expect_err("wildcards should be rejected for firecracker");
         assert!(
