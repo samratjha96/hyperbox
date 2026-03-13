@@ -25,26 +25,20 @@ It is built for:
 ## How It Works
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                          Clients                           │
-│        hyperbox CLI | SDKs | Agent adapters               │
-└─────────────────────────────┬──────────────────────────────┘
-                              │ gRPC / stdio JSON-lines
-┌─────────────────────────────▼──────────────────────────────┐
-│                    hyperbox control plane                  │
-│       runtime, sandboxes, processes, snapshots, policy     │
-└─────────────────┬───────────────────────────┬──────────────┘
-                  │                           │
-        ┌─────────▼─────────┐       ┌────────▼──────────┐
-        │   macOS backend   │       │   Linux backend   │
-        │ host-isolated     │       │ VM-isolated       │
-        │ runtime path      │       │ runtime path      │
-        └─────────┬─────────┘       └────────┬──────────┘
-                  │                           │
-        ┌─────────▼─────────┐       ┌────────▼──────────┐
-        │ Host primitives   │       │ Guest VM + agent  │
-        │ (sandboxing/net)  │       │ execution service │
-        └───────────────────┘       └───────────────────┘
+Clients
+  hyperbox CLI | SDKs | Agent adapters
+          |
+          v   gRPC / stdio JSON-lines
+Control plane
+  runtime, sandboxes, processes, snapshots, policy
+          |
+          +--> macOS backend
+          |      host-isolated runtime path
+          |      -> host primitives (sandboxing/net)
+          |
+          +--> Linux backend
+                 VM-isolated runtime path
+                 -> guest VM + agent execution service
 ```
 
 What to take away:
