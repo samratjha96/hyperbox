@@ -22,6 +22,37 @@ It is built for:
 | Portable control plane | same model for humans, SDKs, and agent tooling |
 | Fast recovery | snapshot create / restore workflows |
 
+## How It Works
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                          Clients                           │
+│        hyperbox CLI | SDKs | Agent adapters               │
+└─────────────────────────────┬──────────────────────────────┘
+                              │ gRPC / stdio JSON-lines
+┌─────────────────────────────▼──────────────────────────────┐
+│                    hyperbox control plane                  │
+│       runtime, sandboxes, processes, snapshots, policy     │
+└─────────────────┬───────────────────────────┬──────────────┘
+                  │                           │
+        ┌─────────▼─────────┐       ┌────────▼──────────┐
+        │   macOS backend   │       │   Linux backend   │
+        │ host-isolated     │       │ VM-isolated       │
+        │ runtime path      │       │ runtime path      │
+        └─────────┬─────────┘       └────────┬──────────┘
+                  │                           │
+        ┌─────────▼─────────┐       ┌────────▼──────────┐
+        │ Host primitives   │       │ Guest VM + agent  │
+        │ (sandboxing/net)  │       │ execution service │
+        └───────────────────┘       └───────────────────┘
+```
+
+What to take away:
+
+- the control plane owns sandbox lifecycle, managed processes, snapshots, session reuse, and policy
+- macOS and Linux enforce isolation differently, but expose the same sandbox and process model
+- the CLI, SDKs, and agent integrations all talk to the same server contract
+
 ## Use It Like This
 
 ### One-off isolated command
@@ -86,6 +117,14 @@ hyperbox run --network allowlist --allow '*.example.com' \
 
 The first command should succeed. The second should fail because `*.example.com` is strict subdomains only.
 
+## Core Concepts
+
+- sessions and affinity: `hyperbox run` reuses a deterministic session unless you pass `--ephemeral`; `create --name` gives you a stable sandbox you can target directly
+- managed processes: `run` starts a tracked process; `run --detach`, `logs`, `wait`, and `cancel` let you delegate work and come back later
+- templates: each sandbox starts from a template such as `python:3.12`; run `hyperbox templates` to inspect what is available
+- network policy: `none`, `allowlist`, and `full` are part of sandbox policy; use `--explain` to see what the current host enforces
+- workspace behavior: `--workspace <PATH>` mounts an existing host tree; without it, Hyperbox creates managed sandbox storage
+
 ## Setup
 
 ### macOS
@@ -101,73 +140,6 @@ cargo build -p hyperbox-cli
 export PATH="$PWD/target/debug:$PATH"
 hyperbox --help
 ```
-
-## Core Concepts
-
-### Sessions and affinity
-
-- `hyperbox run` without `--ephemeral` reuses a deterministic session automatically.
-- `hyperbox create` creates an explicit persistent sandbox.
-- `--name <NAME>` gives you a stable affinity-backed sandbox you can target directly.
-- `hyperbox destroy` tears down by sandbox id or affinity name.
-
-### Managed processes
-
-- `hyperbox run` starts a managed process inside a sandbox.
-- `hyperbox run --detach` returns immediately with a process id.
-- `hyperbox logs`, `hyperbox wait`, and `hyperbox cancel` operate on the same managed process.
-- One sandbox can have one managed foreground process at a time. If a targeted sandbox is already busy, Hyperbox creates a fresh sandbox for the new run and tells you that it did so.
-
-### Templates
-
-- Templates define the base environment for a sandbox.
-- `python:3.12` is the default template.
-- Use `hyperbox templates` to see what is available.
-
-### Network policy
-
-- `none`: no external network access
-- `allowlist`: only listed domains, including strict wildcard subdomains like `*.example.com` on supported backends
-- `full`: unrestricted network
-- `--explain` shows what is actually enforced on the current host
-
-### Workspace behavior
-
-- `--workspace <PATH>` exposes an existing host workspace inside the sandbox
-- without `--workspace`, Hyperbox creates managed sandbox storage
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                          Clients                           │
-│        hyperbox CLI | gRPC clients | Agent adapters       │
-└─────────────────────────────┬──────────────────────────────┘
-                              │ gRPC / stdio JSON-lines
-┌─────────────────────────────▼──────────────────────────────┐
-│                    hyperbox control plane                  │
-│       runtime, sandboxes, processes, snapshots, policy     │
-└─────────────────┬───────────────────────────┬──────────────┘
-                  │                           │
-        ┌─────────▼─────────┐       ┌────────▼──────────┐
-        │   macOS backend   │       │   Linux backend   │
-        │ host-isolated     │       │ VM-isolated       │
-        │ runtime path      │       │ runtime path      │
-        └─────────┬─────────┘       └────────┬──────────┘
-                  │                           │
-        ┌─────────▼─────────┐       ┌────────▼──────────┐
-        │ Host primitives   │       │ Guest VM + agent  │
-        │ (sandboxing/net)  │       │ execution service │
-        └───────────────────┘       └───────────────────┘
-```
-
-Component responsibilities:
-
-- Control plane: sandbox lifecycle, managed process lifecycle, policy resolution, snapshots, session reuse
-- Backends: OS-specific isolation and execution implementation
-- Network enforcement: evaluates and applies `none`/`allowlist`/`full` policy
-- Agent execution service: guest or sidecar command and file operations where required by the backend
-- User interfaces: CLI, gRPC clients, and adapter layers
 
 ## Platform Matrix
 
