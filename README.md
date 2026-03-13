@@ -2,45 +2,37 @@
 
 Secure sandbox runtime for AI agent code execution.
 
-hyperbox gives you a consistent control plane for running untrusted code in isolated sandboxes with explicit network policy, persistent sessions, and durable managed processes.
+Use `hyperbox` when you want to hand work to an isolated environment without losing the ergonomics of a normal shell.
 
-## TL;DR
+It is built for:
 
-**Problem:** Agent workflows need to run arbitrary shell/Python/build commands safely without destroying host environments or leaking credentials, and they also need to delegate work that may outlive a single terminal session.
+- agents that should run code without touching the host
+- long-running jobs you want to detach from and inspect later
+- reusable sandboxes where installs, files, and state persist across commands
+- teams that want one control plane for CLI, SDKs, and agent integrations
 
-**Solution:** Run commands through `hyperbox`, which provides isolated execution, network policy enforcement (`none`/`allowlist`/`full`), reusable sandbox sessions, managed process lifecycle (`run`, `--detach`, `logs`, `wait`, `cancel`), and snapshot restore workflows.
+## Why Use It
 
-### Why hyperbox?
-
-| Capability | What you get |
+| Need | What hyperbox gives you |
 | --- | --- |
-| Secure-by-default execution | `network=none` default policy with explicit opt-in to broader network access |
-| Reusable stateful sessions | Install dependencies once, reuse environment across commands |
-| Durable delegated work | Start a process, disconnect, and come back later for logs, status, and exit code |
-| Agent + human friendly interfaces | CLI and gRPC control plane with the same process model |
-| Isolation transparency | `--explain` shows backend selection and effective policy |
-| Snapshot workflows | Save and restore sandbox state for fast recovery and reproducibility |
+| Safe default execution | isolated sandbox with `network=none` unless you opt in |
+| Reuse across runs | deterministic sessions and named sandboxes |
+| Long-running delegation | `run --detach`, `logs`, `wait`, `cancel` |
+| Clear network control | `none`, `allowlist`, `full` with `--explain` |
+| Portable control plane | same model for humans, SDKs, and agent tooling |
+| Fast recovery | snapshot create / restore workflows |
 
-## Quickstart (2 Minutes)
+## Use It Like This
 
-### 1) Install and setup (macOS)
-
-```bash
-# Ensure `hyperbox` is installed and available on PATH.
-# If developing from source, build it first:
-# cargo build -p hyperbox-cli && export PATH="$PWD/target/debug:$PATH"
-
-hyperbox --help
-hyperbox setup
-```
-
-### 2) Run a command with default locked networking
+### One-off isolated command
 
 ```bash
 hyperbox run --cmd "python3 -c 'print(2 + 2)'"
 ```
 
-### 3) Create a reusable sandbox and keep installed tools
+Use this when you want a safe default and do not care about keeping state.
+
+### Reusable environment with installed tools and files
 
 ```bash
 hyperbox create --name demo --workspace "$PWD" --profile full
@@ -50,7 +42,9 @@ hyperbox run --name demo --cmd "python3 -c 'open(\"build.txt\", \"w\").write(\"s
 hyperbox run --name demo --cmd "cat build.txt"
 ```
 
-### 4) Delegate a longer task and come back later
+Use this when an agent or human needs a stable working environment instead of disposable runs.
+
+### Detach from work and come back later
 
 ```bash
 PROC=$(hyperbox run --name demo \
@@ -62,7 +56,9 @@ hyperbox logs "$PROC"
 hyperbox wait "$PROC"
 ```
 
-### 5) Allow exactly one domain, and verify inverse blocking
+Use this when work should continue without holding open your terminal or SDK call.
+
+### Restrict outbound network access
 
 Note: on some macOS hosts, `allowlist` may be unavailable. If Hyperbox reports that, use `network=none|full` for now and run `hyperbox setup` to check host prerequisites.
 
@@ -78,7 +74,7 @@ The second command should fail because `github.com` is not allowlisted.
 
 Tip: add `--explain` to see effective backend mode and enforcement details for your host.
 
-### 6) Allow subdomains without allowing the apex domain
+### Allow subdomains without allowing the apex domain
 
 ```bash
 hyperbox run --network allowlist --allow '*.example.com' \
@@ -90,34 +86,55 @@ hyperbox run --network allowlist --allow '*.example.com' \
 
 The first command should succeed. The second should fail because `*.example.com` is strict subdomains only.
 
-`hyperbox run` reuses a deterministic session by default. Use `--ephemeral` for create/execute/destroy one-offs.
+## Setup
+
+### macOS
+
+```bash
+hyperbox setup
+```
+
+### From source
+
+```bash
+cargo build -p hyperbox-cli
+export PATH="$PWD/target/debug:$PATH"
+hyperbox --help
+```
 
 ## Core Concepts
 
-### Sandbox model
+### Sessions and affinity
 
-- `hyperbox run` without `--ephemeral` reuses a deterministic affinity session.
+- `hyperbox run` without `--ephemeral` reuses a deterministic session automatically.
 - `hyperbox create` creates an explicit persistent sandbox.
+- `--name <NAME>` gives you a stable affinity-backed sandbox you can target directly.
 - `hyperbox destroy` tears down by sandbox id or affinity name.
 
-### Process model
+### Managed processes
 
 - `hyperbox run` starts a managed process inside a sandbox.
 - `hyperbox run --detach` returns immediately with a process id.
 - `hyperbox logs`, `hyperbox wait`, and `hyperbox cancel` operate on the same managed process.
 - One sandbox can have one managed foreground process at a time. If a targeted sandbox is already busy, Hyperbox creates a fresh sandbox for the new run and tells you that it did so.
 
-### Network model
+### Templates
+
+- Templates define the base environment for a sandbox.
+- `python:3.12` is the default template.
+- Use `hyperbox templates` to see what is available.
+
+### Network policy
 
 - `none`: no external network access
-- `allowlist`: explicit hostnames plus wildcard subdomain patterns like `*.example.com` on supported backends
+- `allowlist`: only listed domains, including strict wildcard subdomains like `*.example.com` on supported backends
 - `full`: unrestricted network
-- Allowlist availability can vary by host/runtime capabilities; `--explain` shows effective enforcement.
+- `--explain` shows what is actually enforced on the current host
 
-### Workspace model
+### Workspace behavior
 
-- `--workspace <PATH>` bind-mounts/link-maps host workspace into sandbox context.
-- Without `--workspace`, sandbox gets managed ephemeral workspace storage.
+- `--workspace <PATH>` exposes an existing host workspace inside the sandbox
+- without `--workspace`, Hyperbox creates managed sandbox storage
 
 ## Architecture
 
