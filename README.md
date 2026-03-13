@@ -37,30 +37,40 @@ hyperbox setup
 ### 2) Run a command with default locked networking
 
 ```bash
-HB=hyperbox
-$HB run --cmd "python3 -c 'print(2 + 2)'"
+hyperbox run --cmd "python3 -c 'print(2 + 2)'"
 ```
 
-### 3) Delegate a longer task and come back later
+### 3) Create a reusable sandbox and keep installed tools
 
 ```bash
-$HB run --profile full --cmd "python3 -m pip install pytest"
-$HB run --profile full --cmd "pytest -q"
-
-PROC=$($HB run --profile full --cmd "python3 -c 'import time; print(\"start\"); time.sleep(30); print(\"done\")'" --detach --json | jq -r '.process.process_id')
-$HB logs "$PROC"
-$HB wait "$PROC"
+hyperbox create --name demo --workspace "$PWD" --profile full
+hyperbox run --name demo --cmd "python3 -m pip install pytest"
+hyperbox run --name demo --cmd "pytest -q"
+hyperbox run --name demo --cmd "python3 -c 'open(\"build.txt\", \"w\").write(\"sandbox state\")'"
+hyperbox run --name demo --cmd "cat build.txt"
 ```
 
-### 4) Allow exactly one domain, and verify inverse blocking
+### 4) Delegate a longer task and come back later
+
+```bash
+PROC=$(hyperbox run --name demo \
+  --cmd "python3 -c 'import time; print(\"start\"); time.sleep(30); print(\"done\")'" \
+  --detach --json | jq -r '.process.process_id')
+
+hyperbox ps
+hyperbox logs "$PROC"
+hyperbox wait "$PROC"
+```
+
+### 5) Allow exactly one domain, and verify inverse blocking
 
 Note: on some macOS hosts, `allowlist` may be unavailable. If Hyperbox reports that, use `network=none|full` for now and run `hyperbox setup` to check host prerequisites.
 
 ```bash
-$HB run --network allowlist --allow example.com \
+hyperbox run --network allowlist --allow example.com \
   --cmd "python3 -c \"import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=8).status)\""
 
-$HB run --network allowlist --allow example.com \
+hyperbox run --network allowlist --allow example.com \
   --cmd "python3 -c \"import urllib.request; urllib.request.urlopen('https://github.com', timeout=8)\""
 ```
 
@@ -68,14 +78,19 @@ The second command should fail because `github.com` is not allowlisted.
 
 Tip: add `--explain` to see effective backend mode and enforcement details for your host.
 
-### 5) Keep state between runs (install once, reuse)
+### 6) Allow subdomains without allowing the apex domain
 
 ```bash
-$HB run --profile full --cmd "python3 -m pip install pytest"
-$HB run --profile full --cmd "pytest -q"
+hyperbox run --network allowlist --allow '*.example.com' \
+  --cmd "python3 -c \"import socket; print(socket.gethostbyname('www.example.com'))\""
+
+hyperbox run --network allowlist --allow '*.example.com' \
+  --cmd "python3 -c \"import socket; print(socket.gethostbyname('example.com'))\""
 ```
 
-`run` reuses a deterministic session by default. Use `--ephemeral` for create/execute/destroy one-offs.
+The first command should succeed. The second should fail because `*.example.com` is strict subdomains only.
+
+`hyperbox run` reuses a deterministic session by default. Use `--ephemeral` for create/execute/destroy one-offs.
 
 ## Core Concepts
 
@@ -168,24 +183,28 @@ Common flows:
 
 ```bash
 # Create, reuse, destroy
-HB=hyperbox
-SBX=$($HB create --name myproj --workspace "$PWD" --profile locked)
-$HB run --name myproj --cmd "python3 -V"
-$HB run --name myproj --cmd "pytest -q" --detach
-$HB ps
-$HB list
-$HB destroy --name myproj
+hyperbox create --name myproj --workspace "$PWD" --profile locked
+hyperbox run --name myproj --cmd "python3 -V"
+hyperbox run --name myproj --cmd "pytest -q" --detach
+hyperbox ps
+hyperbox list
+hyperbox destroy --name myproj
 
 # Snapshot lifecycle
-SBX=$($HB create --workspace "$PWD")
-SNAP=$($HB snapshot create --sandbox-id "$SBX")
-$HB destroy --sandbox-id "$SBX"
-$HB snapshot restore --snapshot-id "$SNAP"
+hyperbox create --name snapdemo --workspace "$PWD"
+hyperbox run --name snapdemo --cmd "echo snapshot-state > snap.txt"
+SNAP=$(hyperbox snapshot create --name snapdemo --json | jq -r '.snapshot_id')
+hyperbox destroy --name snapdemo
+hyperbox snapshot restore --snapshot-id "$SNAP"
 
 # Managed process lifecycle
-PROC=$($HB run --name myproj --cmd "pytest -q" --detach --json | jq -r '.process.process_id')
-$HB logs "$PROC"
-$HB wait "$PROC"
+PROC=$(hyperbox run --name myproj --cmd "pytest -q" --detach --json | jq -r '.process.process_id')
+hyperbox logs "$PROC"
+hyperbox wait "$PROC"
+
+# Cancel a long-running task
+PROC=$(hyperbox run --name myproj --cmd "python3 -c 'import time; time.sleep(300)'" --detach --json | jq -r '.process.process_id')
+hyperbox cancel "$PROC"
 ```
 
 For complete command flags:
@@ -218,8 +237,7 @@ allow = ["github.com", "pypi.org", "files.pythonhosted.org"]
 ```
 
 ```bash
-HB=hyperbox
-$HB run --profile team_web --cmd "python3 -m pip install requests"
+hyperbox run --profile team_web --cmd "python3 -m pip install requests"
 ```
 
 ## Environment Variables
@@ -307,19 +325,18 @@ The CLI `run` path handles this for you by creating a fresh sandbox and telling 
 
 ### `invalid allowlist ...`
 
-Use explicit hostnames only:
+Use hostnames or strict wildcard subdomain patterns:
 
-- valid: `example.com`, `api.github.com`
-- invalid: `*.example.com`, `https://example.com`, `example.com:443`
+- valid: `example.com`, `api.github.com`, `*.example.com`
+- invalid: `*example.com`, `https://example.com`, `example.com:443`
 
 ### `command not found` inside sandbox
 
 Install tool in the persistent sandbox session first:
 
 ```bash
-HB=hyperbox
-$HB run --profile full --cmd "python3 -m pip install pytest"
-$HB run --profile full --cmd "pytest -q"
+hyperbox run --profile full --cmd "python3 -m pip install pytest"
+hyperbox run --profile full --cmd "pytest -q"
 ```
 
 ## Security Notes and Current Limits
