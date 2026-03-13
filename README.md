@@ -300,28 +300,38 @@ Benchmark tooling and historical reports are included in the repository. Treat r
 
 ## Troubleshooting
 
-### `server does not support 'list' yet (likely stale daemon)`
+### CLI says the control plane is stale or unreachable
 
-Restart the local control plane and retry:
+If you just rebuilt `hyperbox` or changed versions, an older local daemon may still be running.
+
+Restart it and retry:
 
 ```bash
 pkill -f hyperbox || true
 hyperbox list
 ```
 
-### `failed to connect to hyperbox control plane`
-
-Ensure server autostart is enabled (default) or start manually:
+If you run the control plane manually, start it explicitly:
 
 ```bash
 hyperbox serve --addr 127.0.0.1:50051
 ```
 
-### `sandbox ... already has a running managed process`
+### Allowlist mode is unavailable or behaving unexpectedly
 
-If you target a busy sandbox directly through lower-level APIs, Hyperbox rejects the second managed process.
+Check what Hyperbox is actually enforcing on this host:
 
-The CLI `run` path handles this for you by creating a fresh sandbox and telling you that it did so.
+```bash
+hyperbox run --network allowlist --allow example.com --cmd "true" --explain
+```
+
+On macOS, `hyperbox setup` installs and verifies the runtime prerequisites used by the built-in helper:
+
+```bash
+hyperbox setup
+```
+
+If the host cannot enforce allowlists yet, use `network=none` or `network=full` instead of assuming partial enforcement.
 
 ### `invalid allowlist ...`
 
