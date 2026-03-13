@@ -285,7 +285,38 @@ with HyperboxClient("127.0.0.1:50051") as client:
 
 ## Performance and Benchmarks
 
-Benchmark tooling and historical reports are included in the repository. Treat reported numbers as environment-specific baselines and rerun benchmarks in your own setup before making decisions.
+Hyperbox was run against the [ComputeSDK benchmarks](https://github.com/computesdk/benchmarks) using the real benchmark flow:
+
+1. create a fresh sandbox
+2. run `node -v`
+3. destroy the sandbox
+
+No session reuse or benchmark-only shortcuts were used.
+
+Directional result from the local macOS run used during development:
+
+| Provider | Median TTI | Score | Position |
+| --- | ---: | ---: | --- |
+| Daytona | 0.11s | 98.00 | leader |
+| E2B | 0.24s | 95.31 | leader |
+| Blaxel | 0.48s | 94.28 | leader |
+| Hyperbox (local macOS) | 0.92s | 89.2 | near Runloop / Hopx tier |
+| Runloop | 0.89s | 90.61 | nearby |
+| Hopx | 0.88s | 89.53 | nearby |
+
+Important caveat:
+
+- Hyperbox was measured locally on macOS with a small sample during development
+- the published ComputeSDK leaderboard was measured on their own infrastructure with larger samples
+- treat this as directional positioning, not a claimed official rank
+
+What this means in practice:
+
+- Hyperbox is not the fastest cold-start sandbox in that benchmark today
+- it is in the next competitive tier rather than far off the board
+- the remaining gap is mostly backend startup cost, not obvious control-plane waste
+
+Benchmark tooling and historical reports are included in the repository. Rerun benchmarks in your own environment before making decisions.
 
 ## Troubleshooting
 
