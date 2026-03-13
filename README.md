@@ -22,6 +22,21 @@ It is built for:
 | Portable control plane | same model for humans, SDKs, and agent tooling |
 | Fast recovery | snapshot create / restore workflows |
 
+## Benchmark Snapshot
+
+Hyperbox has already been run against the real [ComputeSDK benchmarks](https://github.com/computesdk/benchmarks) flow for fresh sandbox create -> first command -> destroy.
+
+| Provider | Median TTI | Score | Position |
+| --- | ---: | ---: | --- |
+| Daytona | 0.11s | 98.00 | leader |
+| E2B | 0.24s | 95.31 | leader |
+| Blaxel | 0.48s | 94.28 | leader |
+| Hyperbox | 0.92s | 89.2 | near Runloop / Hopx tier |
+| Runloop | 0.89s | 90.61 | nearby |
+| Hopx | 0.88s | 89.53 | nearby |
+
+Full benchmark notes and caveats are below in [Performance and Benchmarks](#performance-and-benchmarks).
+
 ## How It Works
 
 ```
