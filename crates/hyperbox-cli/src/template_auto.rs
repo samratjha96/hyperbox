@@ -14,6 +14,24 @@ pub enum TemplateReason {
     Fallback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TemplateRule {
+    template: &'static str,
+    reason: TemplateReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandRule {
+    matchers: &'static [&'static str],
+    template: TemplateRule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspaceRule {
+    manifests: &'static [&'static str],
+    template: TemplateRule,
+}
+
 impl TemplateReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -36,6 +54,81 @@ pub struct TemplateResolution {
     pub template: String,
     pub reason: TemplateReason,
 }
+
+const COMMAND_RULES: &[CommandRule] = &[
+    CommandRule {
+        matchers: &["cargo ", "cargo\n", "cargo\t", "cargo-", "rustc"],
+        template: TemplateRule {
+            template: "rust:1.75",
+            reason: TemplateReason::CommandHintRust,
+        },
+    },
+    CommandRule {
+        matchers: &["go ", "go\n", "go\t", "go test", "go build", "go run"],
+        template: TemplateRule {
+            template: "golang:1.22",
+            reason: TemplateReason::CommandHintGo,
+        },
+    },
+    CommandRule {
+        matchers: &["npm ", "node ", "pnpm ", "yarn ", "npx ", "bun ", "tsx "],
+        template: TemplateRule {
+            template: "node:20",
+            reason: TemplateReason::CommandHintNode,
+        },
+    },
+    CommandRule {
+        matchers: &["python", "pip ", "pytest", "uv ", "poetry ", "ipython"],
+        template: TemplateRule {
+            template: "python:3.12",
+            reason: TemplateReason::CommandHintPython,
+        },
+    },
+];
+
+const WORKSPACE_RULES: &[WorkspaceRule] = &[
+    WorkspaceRule {
+        manifests: &["Cargo.toml"],
+        template: TemplateRule {
+            template: "rust:1.75",
+            reason: TemplateReason::WorkspaceCargoToml,
+        },
+    },
+    WorkspaceRule {
+        manifests: &["go.mod"],
+        template: TemplateRule {
+            template: "golang:1.22",
+            reason: TemplateReason::WorkspaceGoMod,
+        },
+    },
+    WorkspaceRule {
+        manifests: &[
+            "package.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "package-lock.json",
+            "bun.lockb",
+        ],
+        template: TemplateRule {
+            template: "node:20",
+            reason: TemplateReason::WorkspaceNodeManifest,
+        },
+    },
+    WorkspaceRule {
+        manifests: &[
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "setup.py",
+            "Pipfile",
+            "poetry.lock",
+        ],
+        template: TemplateRule {
+            template: "python:3.12",
+            reason: TemplateReason::WorkspacePythonManifest,
+        },
+    },
+];
 
 pub fn resolve_template(
     template_arg: &str,
@@ -70,57 +163,24 @@ fn detect_from_command_hint(command_hint: &str) -> Option<TemplateResolution> {
     }
     let hint = command_hint.to_ascii_lowercase();
 
-    if contains_any(&hint, &["cargo ", "cargo\n", "cargo\t", "cargo-", "rustc"]) {
-        return Some(resolved("rust:1.75", TemplateReason::CommandHintRust));
-    }
-    if contains_any(
-        &hint,
-        &["go ", "go\n", "go\t", "go test", "go build", "go run"],
-    ) {
-        return Some(resolved("golang:1.22", TemplateReason::CommandHintGo));
-    }
-    if contains_any(
-        &hint,
-        &["npm ", "node ", "pnpm ", "yarn ", "npx ", "bun ", "tsx "],
-    ) {
-        return Some(resolved("node:20", TemplateReason::CommandHintNode));
-    }
-    if contains_any(
-        &hint,
-        &["python", "pip ", "pytest", "uv ", "poetry ", "ipython"],
-    ) {
-        return Some(resolved("python:3.12", TemplateReason::CommandHintPython));
+    for rule in COMMAND_RULES {
+        if contains_any(&hint, rule.matchers) {
+            return Some(resolved(rule.template.template, rule.template.reason));
+        }
     }
 
     None
 }
 
 fn detect_from_workspace(root: &Path) -> Option<TemplateResolution> {
-    if root.join("Cargo.toml").exists() {
-        return Some(resolved("rust:1.75", TemplateReason::WorkspaceCargoToml));
-    }
-    if root.join("go.mod").exists() {
-        return Some(resolved("golang:1.22", TemplateReason::WorkspaceGoMod));
-    }
-    if root.join("package.json").exists()
-        || root.join("pnpm-lock.yaml").exists()
-        || root.join("yarn.lock").exists()
-        || root.join("package-lock.json").exists()
-        || root.join("bun.lockb").exists()
-    {
-        return Some(resolved("node:20", TemplateReason::WorkspaceNodeManifest));
-    }
-    if root.join("pyproject.toml").exists()
-        || root.join("requirements.txt").exists()
-        || root.join("requirements-dev.txt").exists()
-        || root.join("setup.py").exists()
-        || root.join("Pipfile").exists()
-        || root.join("poetry.lock").exists()
-    {
-        return Some(resolved(
-            "python:3.12",
-            TemplateReason::WorkspacePythonManifest,
-        ));
+    for rule in WORKSPACE_RULES {
+        if rule
+            .manifests
+            .iter()
+            .any(|manifest| root.join(manifest).exists())
+        {
+            return Some(resolved(rule.template.template, rule.template.reason));
+        }
     }
 
     None
