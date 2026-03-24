@@ -133,28 +133,49 @@ This validates:
 - ensure-once behavior
 - key edge failures (policy misconfiguration and invalid templates)
 
-## Agent Invocation Flow (stdio)
+## Agent Runtime Patterns
 
-Run `hyperbox proxy`, then stream one JSON request per line from your agent harness.
+### Pattern A: Agent uses Hyperbox as isolated VM execution substrate
+
+Your agent process stays on the host. Every tool call goes into a Hyperbox sandbox/VM.
+
+One-shot task sandbox (create + run bash + write/read + destroy):
 
 ```bash
 cat <<'EOF' | hyperbox proxy --workspace "$PWD" --template auto --network none
-{"op":"ping"}
-{"op":"exec","cmd":"python3 -c \"print(2 + 2)\"","timeout":60}
-{"op":"write","path":"agent-note.txt","content":"done"}
-{"op":"read","path":"agent-note.txt"}
+{"op":"write","path":"task.sh","content":"#!/usr/bin/env bash\nset -euo pipefail\necho from-sandbox > result.txt\n"}
+{"op":"exec","cmd":"bash task.sh","timeout":60}
+{"op":"read","path":"result.txt"}
 {"op":"destroy"}
 EOF
 ```
 
-Request ops:
-- `ping`: health check
-- `exec`: run command in sandbox
-- `write`: write file into sandbox
-- `read`: read file from sandbox
-- `destroy`: tear down sandbox and exit proxy
+Reusable sandbox for multi-step agent workflows:
 
-## SDK Invocation Flow (Python)
+```bash
+hyperbox create --name agent-job --workspace "$PWD" --template auto --network none
+hyperbox run --name agent-job --cmd "bash scripts/step1.sh"
+hyperbox run --name agent-job --cmd "bash scripts/step2.sh"
+hyperbox run --name agent-job --cmd "cat outputs/final.txt"
+hyperbox destroy --name agent-job
+```
+
+### Pattern B: Agent runtime itself runs inside Hyperbox
+
+Run the full agent process inside a sandbox/VM and only expose the policy you want:
+
+```bash
+hyperbox run \
+  --template python:3.12 \
+  --workspace "$PWD" \
+  --network allowlist \
+  --allow api.openai.com \
+  --allow pypi.org \
+  --allow files.pythonhosted.org \
+  --cmd "python3 agents/main.py"
+```
+
+## SDK Invocation Flow (Python, host agent controlling sandbox lifecycle)
 
 ```bash
 pip install -e hyperbox-py
@@ -164,21 +185,24 @@ pip install -e hyperbox-py
 from hyperbox import HyperboxClient
 
 with HyperboxClient("127.0.0.1:50051") as client:
-    run = client.run(
-        affinity_name="agent-repo",
+    sandbox = client.create_sandbox(
+        affinity_name="agent-job",
         template="auto",
-        workspace_dir=".",
-        command="python3 -c 'print(42)'",
+        workspace=".",
+        network="none",
     )
-    print(run.stdout)
-
-    started = client.start_run(
-        affinity_name="agent-repo",
-        command="pytest -q",
+    client.write_file(
+        sandbox.id,
+        "task.sh",
+        "#!/usr/bin/env bash\nset -euo pipefail\necho from-sdk > result.txt\n",
     )
-    finished = client.wait_process(started.process.process_id, timeout_secs=600)
-    logs = client.read_process_log(started.process.process_id, "stdout")
-    print(finished.status, logs.contents)
+    run = client.run(
+        sandbox_id=sandbox.id,
+        command="bash task.sh",
+    )
+    result = client.read_file(sandbox.id, "result.txt").decode("utf-8")
+    print(run.process.status, result)
+    client.destroy_sandbox(sandbox.id)
 ```
 
 ## Environment Variables
