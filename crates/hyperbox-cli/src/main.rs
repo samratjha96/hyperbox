@@ -609,7 +609,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let resolved_template =
-                resolve_template_for_operation(&template, workspace.as_deref(), Some(&cmd));
+                resolve_template_for_operation(&template, workspace.as_deref(), &cmd);
             let config = SandboxConfig {
                 template: resolved_template,
                 network: resolved_policy.network_mode,
@@ -692,7 +692,7 @@ async fn main() -> anyhow::Result<()> {
                 cli.profile_config.as_deref(),
             )?;
             let resolved_template =
-                resolve_template_for_operation(&template, workspace.as_deref(), None);
+                resolve_template_for_operation(&template, workspace.as_deref(), "");
             let config = SandboxConfig {
                 affinity_name: name,
                 template: resolved_template,
@@ -983,7 +983,7 @@ async fn main() -> anyhow::Result<()> {
             workspace,
         } => {
             let resolved_template =
-                resolve_template_for_operation(&template, workspace.as_deref(), None);
+                resolve_template_for_operation(&template, workspace.as_deref(), "");
             run_proxy_loop(
                 cli.server_url,
                 SandboxConfig {
@@ -1122,7 +1122,7 @@ fn parse_snapshot_id(raw: &str) -> anyhow::Result<SnapshotId> {
 fn resolve_template_for_operation(
     template_arg: &str,
     workspace: Option<&str>,
-    command_hint: Option<&str>,
+    command_hint: &str,
 ) -> String {
     let workspace = workspace.map(ToString::to_string).unwrap_or_else(|| {
         std::env::current_dir()
@@ -1130,12 +1130,12 @@ fn resolve_template_for_operation(
             .to_string_lossy()
             .to_string()
     });
-    let command_hint = command_hint.unwrap_or_default();
     let resolved = template_auto::resolve_template(template_arg, &workspace, command_hint);
     if template_arg.eq_ignore_ascii_case("auto") {
         eprintln!(
             "template: auto-selected `{}` ({})",
-            resolved.template, resolved.reason
+            resolved.template,
+            resolved.reason.as_str()
         );
     }
     resolved.template
@@ -1916,8 +1916,7 @@ async fn shell_command(
                 .to_string(),
         ),
     };
-    let resolved_template =
-        resolve_template_for_operation(&template, workspace_dir.as_deref(), None);
+    let resolved_template = resolve_template_for_operation(&template, workspace_dir.as_deref(), "");
 
     let summary = build_effective_isolation_summary(
         server_info.as_ref(),
