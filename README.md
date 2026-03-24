@@ -30,14 +30,14 @@ Hyperbox is the execution/control layer. Org-specific approval, identity, and co
 
 ```bash
 cargo build -p hyperbox-cli
-HB=./target/debug/hyperbox
+export PATH="$(pwd)/target/debug:$PATH"
 
 # Locked networking by default
-$HB run --cmd "python3 -c 'print(2 + 2)'"
+hyperbox run --cmd "python3 -c 'print(2 + 2)'"
 
 # Reuse environment across commands
-$HB run --profile full --cmd "python3 -m pip install pytest"
-$HB run --profile full --cmd "pytest -q"
+hyperbox run --profile full --cmd "python3 -m pip install pytest"
+hyperbox run --profile full --cmd "pytest -q"
 ```
 
 ## Core Workflows
@@ -45,30 +45,27 @@ $HB run --profile full --cmd "pytest -q"
 ### Reusable sandbox session
 
 ```bash
-HB=./target/debug/hyperbox
-$HB create --name demo --workspace "$PWD" --template auto
-$HB run --name demo --cmd "python3 -V"
-$HB destroy --name demo
+hyperbox create --name demo --workspace "$PWD" --template auto
+hyperbox run --name demo --cmd "python3 -V"
+hyperbox destroy --name demo
 ```
 
 ### Managed background process
 
 ```bash
-HB=./target/debug/hyperbox
-OUT=$($HB run --cmd "sleep 30" --detach --json)
+OUT=$(hyperbox run --cmd "sleep 30" --detach --json)
 PROC_ID=$(python -c 'import json,sys;print(json.loads(sys.argv[1])["process"]["process_id"])' "$OUT")
-$HB ps
-$HB logs "$PROC_ID"
-$HB wait "$PROC_ID" --json
-$HB cancel "$PROC_ID"
+hyperbox ps
+hyperbox logs "$PROC_ID"
+hyperbox wait "$PROC_ID" --json
+hyperbox cancel "$PROC_ID"
 ```
 
 ### Network allowlist (exact hosts and wildcard subdomains)
 
 ```bash
-HB=./target/debug/hyperbox
-$HB run --network allowlist --allow example.com --cmd "python3 -c \"import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=8).status)\""
-$HB run --network allowlist --allow '*.example.com' --cmd "python3 -c \"import socket; print(socket.gethostbyname('www.example.com'))\""
+hyperbox run --network allowlist --allow example.com --cmd "python3 -c \"import urllib.request; print(urllib.request.urlopen('https://example.com', timeout=8).status)\""
+hyperbox run --network allowlist --allow '*.example.com' --cmd "python3 -c \"import socket; print(socket.gethostbyname('www.example.com'))\""
 ```
 
 ## Template Auto-Detection
@@ -114,11 +111,11 @@ Built-in template families include Python, Node, Go, Rust, and Ubuntu base.
 For command flags:
 
 ```bash
-./target/debug/hyperbox --help
-./target/debug/hyperbox run --help
-./target/debug/hyperbox create --help
-./target/debug/hyperbox ps --help
-./target/debug/hyperbox snapshot --help
+hyperbox --help
+hyperbox run --help
+hyperbox create --help
+hyperbox ps --help
+hyperbox snapshot --help
 ```
 
 ## Real E2E Validation
@@ -136,6 +133,54 @@ This validates:
 - ensure-once behavior
 - key edge failures (policy misconfiguration and invalid templates)
 
+## Agent Invocation Flow (stdio)
+
+Run `hyperbox proxy`, then stream one JSON request per line from your agent harness.
+
+```bash
+cat <<'EOF' | hyperbox proxy --workspace "$PWD" --template auto --network none
+{"op":"ping"}
+{"op":"exec","cmd":"python3 -c \"print(2 + 2)\"","timeout":60}
+{"op":"write","path":"agent-note.txt","content":"done"}
+{"op":"read","path":"agent-note.txt"}
+{"op":"destroy"}
+EOF
+```
+
+Request ops:
+- `ping`: health check
+- `exec`: run command in sandbox
+- `write`: write file into sandbox
+- `read`: read file from sandbox
+- `destroy`: tear down sandbox and exit proxy
+
+## SDK Invocation Flow (Python)
+
+```bash
+pip install -e hyperbox-py
+```
+
+```python
+from hyperbox import HyperboxClient
+
+with HyperboxClient("127.0.0.1:50051") as client:
+    run = client.run(
+        affinity_name="agent-repo",
+        template="auto",
+        workspace_dir=".",
+        command="python3 -c 'print(42)'",
+    )
+    print(run.stdout)
+
+    started = client.start_run(
+        affinity_name="agent-repo",
+        command="pytest -q",
+    )
+    finished = client.wait_process(started.process.process_id, timeout_secs=600)
+    logs = client.read_process_log(started.process.process_id, "stdout")
+    print(finished.status, logs.contents)
+```
+
 ## Environment Variables
 
 | Variable | Purpose |
@@ -147,21 +192,6 @@ This validates:
 | `HYPERBOX_AGENT_AUTOSTART` | Disable auto-start sidecar when set to `0`/`false` |
 | `HYPERBOX_NETWORK_DRY_RUN` | Firewall dry-run behavior for Firecracker network enforcement |
 | `HYPERBOX_LOCAL_ALLOW_UNENFORCED_NETWORK` | Allow non-`none` network in local backend (dev-only) |
-
-## Python SDK
-
-```bash
-pip install -e hyperbox-py
-```
-
-```python
-from hyperbox import HyperboxClient, SandboxSession
-
-with HyperboxClient("127.0.0.1:50051") as client:
-    with SandboxSession(client, template="python:3.12", workspace=".") as box:
-        out = box.exec("python3 -c 'print(42)'")
-        print(out.stdout)
-```
 
 ## Troubleshooting
 
