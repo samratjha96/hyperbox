@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::mpsc,
     time::sleep,
 };
@@ -29,6 +29,7 @@ use hyperbox_server::{GrpcControlClient, HyperboxServer, LocalBackend, ServerInf
 
 mod apple_helper;
 mod setup;
+mod template_auto;
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50051";
 const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:50051";
@@ -75,8 +76,8 @@ enum Command {
         name: Option<String>,
         #[arg(
             long,
-            default_value = "python:3.12",
-            help = "Template image for new sandbox creation"
+            default_value = "auto",
+            help = "Template image for new sandbox creation (`auto` detects from command/workspace)"
         )]
         template: String,
         #[arg(
@@ -157,8 +158,8 @@ enum Command {
         name: Option<String>,
         #[arg(
             long,
-            default_value = "python:3.12",
-            help = "Template image for sandbox"
+            default_value = "auto",
+            help = "Template image for sandbox (`auto` detects from workspace)"
         )]
         template: String,
         #[arg(long, value_enum, help = "Network mode")]
@@ -345,8 +346,8 @@ enum Command {
     Proxy {
         #[arg(
             long,
-            default_value = "python:3.12",
-            help = "Template image for proxy sandbox"
+            default_value = "auto",
+            help = "Template image for proxy sandbox (`auto` detects from workspace)"
         )]
         template: String,
         #[arg(long, value_enum, default_value_t = NetworkArg::None, help = "Network mode")]
@@ -607,8 +608,10 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
+            let resolved_template =
+                resolve_template_for_operation(&template, workspace.as_deref(), Some(&cmd));
             let config = SandboxConfig {
-                template,
+                template: resolved_template,
                 network: resolved_policy.network_mode,
                 timeout_secs: timeout,
                 workspace_dir: workspace,
@@ -688,9 +691,11 @@ async fn main() -> anyhow::Result<()> {
                 allow,
                 cli.profile_config.as_deref(),
             )?;
+            let resolved_template =
+                resolve_template_for_operation(&template, workspace.as_deref(), None);
             let config = SandboxConfig {
                 affinity_name: name,
-                template,
+                template: resolved_template,
                 memory_mb,
                 vcpu_count,
                 network: resolved_policy.network_mode,
@@ -911,7 +916,7 @@ async fn main() -> anyhow::Result<()> {
                 sandbox_id,
                 name,
                 &shell,
-                template.unwrap_or_else(|| "python:3.12".to_string()),
+                template.unwrap_or_else(|| "auto".to_string()),
                 workspace,
                 resolved_policy.network_mode,
                 resolved_policy.profile_label,
@@ -977,10 +982,12 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             workspace,
         } => {
+            let resolved_template =
+                resolve_template_for_operation(&template, workspace.as_deref(), None);
             run_proxy_loop(
                 cli.server_url,
                 SandboxConfig {
-                    template,
+                    template: resolved_template,
                     network: network.to_mode(
                         Allowlist::parse(&allow)
                             .map_err(|msg| anyhow::anyhow!("invalid allowlist: {msg}"))?,
@@ -1110,6 +1117,28 @@ fn parse_snapshot_id(raw: &str) -> anyhow::Result<SnapshotId> {
     let id = uuid::Uuid::parse_str(raw)
         .with_context(|| format!("invalid snapshot id `{raw}`: expected UUID"))?;
     Ok(SnapshotId(id))
+}
+
+fn resolve_template_for_operation(
+    template_arg: &str,
+    workspace: Option<&str>,
+    command_hint: Option<&str>,
+) -> String {
+    let workspace = workspace.map(ToString::to_string).unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    });
+    let command_hint = command_hint.unwrap_or_default();
+    let resolved = template_auto::resolve_template(template_arg, &workspace, command_hint);
+    if template_arg.eq_ignore_ascii_case("auto") {
+        eprintln!(
+            "template: auto-selected `{}` ({})",
+            resolved.template, resolved.reason
+        );
+    }
+    resolved.template
 }
 
 fn init_tracing() {
@@ -1887,6 +1916,8 @@ async fn shell_command(
                 .to_string(),
         ),
     };
+    let resolved_template =
+        resolve_template_for_operation(&template, workspace_dir.as_deref(), None);
 
     let summary = build_effective_isolation_summary(
         server_info.as_ref(),
@@ -1899,14 +1930,14 @@ async fn shell_command(
     ensure_network_mode_supported(server_info.as_ref(), &network)?;
 
     info!(
-        template = %template,
+        template = %resolved_template,
         workspace = ?workspace_dir,
         "creating ephemeral shell sandbox"
     );
     let create_started = Instant::now();
     let sandbox = client
         .create_sandbox(SandboxConfig {
-            template,
+            template: resolved_template,
             network,
             workspace_dir,
             ..SandboxConfig::default()
@@ -2298,8 +2329,6 @@ enum ProxyResponse {
 }
 
 async fn run_proxy_loop(server_url: Option<String>, config: SandboxConfig) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
     let template = config.template.clone();
     let workspace = config.workspace_dir.clone();
     let network_label = match &config.network {

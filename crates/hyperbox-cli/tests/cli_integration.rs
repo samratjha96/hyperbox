@@ -1,9 +1,11 @@
 use std::{
+    fs,
     net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
     time::Duration,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use uuid::Uuid;
@@ -256,7 +258,6 @@ fn list_shows_created_sandbox() {
     let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(stdout.contains(&sandbox_id));
 }
-
 #[test]
 fn detached_run_can_be_waited_and_logged() {
     let Some((mut server, url)) = spawn_server() else {
@@ -402,4 +403,150 @@ fn run_creates_new_sandbox_when_target_is_busy() {
     assert!(second.status.success());
     assert!(String::from_utf8_lossy(&second.stdout).contains("overflow-ok"));
     assert!(String::from_utf8_lossy(&second.stderr).contains("created a new sandbox"));
+}
+
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+#[test]
+fn create_auto_template_detects_rust_workspace() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let workspace = unique_temp_dir("hyperbox-auto-template");
+    fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"auto-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write cargo manifest");
+
+    let out = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "create",
+            "--template",
+            "auto",
+            "--workspace",
+            &workspace.to_string_lossy(),
+            "--json",
+        ])
+        .output()
+        .expect("run create --template auto");
+
+    let _ = server.kill();
+    let _ = fs::remove_dir_all(&workspace);
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"template\":\"rust:1.75\""));
+}
+
+#[test]
+fn create_auto_template_detects_go_workspace() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let workspace = unique_temp_dir("hyperbox-auto-template-go");
+    fs::write(workspace.join("go.mod"), "module example.com/hbtest\n").expect("write go.mod");
+
+    let out = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "create",
+            "--template",
+            "auto",
+            "--workspace",
+            &workspace.to_string_lossy(),
+            "--json",
+        ])
+        .output()
+        .expect("run create --template auto");
+
+    let _ = server.kill();
+    let _ = fs::remove_dir_all(&workspace);
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"template\":\"golang:1.22\""));
+}
+
+#[test]
+fn create_auto_template_detects_node_workspace() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let workspace = unique_temp_dir("hyperbox-auto-template-node");
+    fs::write(
+        workspace.join("package.json"),
+        "{\"name\":\"hb-test\",\"version\":\"1.0.0\"}\n",
+    )
+    .expect("write package.json");
+
+    let out = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "create",
+            "--template",
+            "auto",
+            "--workspace",
+            &workspace.to_string_lossy(),
+            "--json",
+        ])
+        .output()
+        .expect("run create --template auto");
+
+    let _ = server.kill();
+    let _ = fs::remove_dir_all(&workspace);
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"template\":\"node:20\""));
+}
+
+#[test]
+fn create_auto_template_detects_python_workspace() {
+    let Some((mut server, url)) = spawn_server() else {
+        return;
+    };
+
+    let workspace = unique_temp_dir("hyperbox-auto-template-python");
+    fs::write(
+        workspace.join("pyproject.toml"),
+        "[project]\nname = \"hb-test\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write pyproject.toml");
+
+    let out = Command::new(hyperbox_bin())
+        .args([
+            "--server-url",
+            &url,
+            "create",
+            "--template",
+            "auto",
+            "--workspace",
+            &workspace.to_string_lossy(),
+            "--json",
+        ])
+        .output()
+        .expect("run create --template auto");
+
+    let _ = server.kill();
+    let _ = fs::remove_dir_all(&workspace);
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"template\":\"python:3.12\""));
 }
